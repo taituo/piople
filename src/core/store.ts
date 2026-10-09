@@ -29,6 +29,16 @@ CREATE TABLE decisions (
   status TEXT NOT NULL, created_at INTEGER NOT NULL, resolved_at INTEGER);
 CREATE INDEX decisions_ctx ON decisions(context_id, status);
 `,
+  // Migration 2: run ledger. One row per runner invocation; outcome is free text.
+  `
+CREATE TABLE runs (
+  id TEXT PRIMARY KEY, case_id TEXT NOT NULL, model TEXT NOT NULL,
+  started_at INTEGER NOT NULL, finished_at INTEGER,
+  rounds INTEGER NOT NULL, tokens_in INTEGER NOT NULL DEFAULT 0, tokens_out INTEGER NOT NULL DEFAULT 0,
+  tool_calls INTEGER NOT NULL DEFAULT 0, proposals INTEGER NOT NULL DEFAULT 0,
+  outcome TEXT NOT NULL DEFAULT 'running');
+CREATE INDEX runs_case ON runs(case_id, started_at);
+`,
 ];
 
 export class Store {
@@ -122,6 +132,24 @@ export class Store {
 
   getDecision(contextId: Id, decisionId: Id): { status: string; answer: string | null } | undefined {
     return this.db.prepare(`SELECT status, answer FROM decisions WHERE id=? AND context_id=?`).get(decisionId, contextId) as { status: string; answer: string | null } | undefined;
+  }
+
+  startRun(id: string, caseId: string, model: string, rounds: number): void {
+    this.db.prepare(`INSERT INTO runs(id,case_id,model,started_at,rounds) VALUES(?,?,?,?,?)`).run(id, caseId, model, Date.now(), rounds);
+  }
+
+  finishRun(id: string, r: { tokensIn: number; tokensOut: number; toolCalls: number; proposals: number; outcome: string }): void {
+    const info = this.db.prepare(`UPDATE runs SET finished_at=?,tokens_in=?,tokens_out=?,tool_calls=?,proposals=?,outcome=? WHERE id=?`).run(
+      Date.now(), r.tokensIn, r.tokensOut, r.toolCalls, r.proposals, r.outcome, id,
+    );
+    if (info.changes !== 1) throw new Error(`run-not-found: ${id}`);
+  }
+
+  listRuns(caseId?: string): Array<Record<string, unknown>> {
+    const rows = caseId
+      ? this.db.prepare(`SELECT * FROM runs WHERE case_id=? ORDER BY started_at`).all(caseId)
+      : this.db.prepare(`SELECT * FROM runs ORDER BY started_at`).all();
+    return rows as Array<Record<string, unknown>>;
   }
 
   resolveDecision(contextId: Id, actorId: Id, key: string, decisionId: Id, answer: string): PiopleEvent {

@@ -25,6 +25,8 @@ const KICKOFF = arg("kickoff", "Auttakaa tässä: checkout-api kaatuu aina resta
 const s = new Store(DATA);
 const bearer = readBearer();
 const now = Date.now();
+const runId = `run-${now}`;
+s.startRun(runId, CTX, MODEL, ROUNDS);
 
 for (const a of ["human:alice", "agent:scout", "agent:builder"]) {
   s.upsertActor({ id: a, kind: a.startsWith("human:") ? "human" : "agent", name: a });
@@ -55,5 +57,6 @@ for (let round = 0; round < ROUNDS; round++) {
 }
 s.requestDecision({ id: `d-${now}`, contextId: CTX, question: "Hyväksytäänkö agenttien ehdotus jatkoselvitykseen?", options: ["yes", "no"], requestedBy: "agent:builder", decidedBy: null, answer: null, status: "open", createdAt: Date.now(), resolvedAt: null });
 console.log(`RUN db=${DATA} case=${CTX} model=${MODEL} rounds=${ROUNDS} tokens=${totalIn}+${totalOut} toolCalls=${toolCalls} proposals=${proposals}`);
+s.finishRun(runId, { tokensIn: totalIn, tokensOut: totalOut, toolCalls, proposals, outcome: "done" });
 console.log(`Events: ${s.eventsSince(CTX, 0, 1000).length}. Human: resolve with resolveDecision().`);
 s.close();
