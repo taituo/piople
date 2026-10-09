@@ -4,7 +4,10 @@ import { Store } from "../core/index.ts";
 
 const PORT = Number(process.env.PIO_PORT ?? 8899);
 const DATA = process.env.PIO_DATA ?? "./data/piople.sqlite";
-const TEST_USER = process.env.PIO_TEST_USER ?? ""; // e.g. "human:alice" — dev/synthetic only, never trust blindly in prod
+const TEST_USER = process.env.PIO_TEST_USER ?? ""; // dev/synthetic only
+// AUTH_MODE=proxy: identity ONLY from x-piople-actor (set by a trusted proxy),
+// body.actorId and TEST_USER are ignored. Default dev keeps current behavior.
+const AUTH_MODE = process.env.PIO_AUTH_MODE ?? "dev";
 
 const store = new Store(DATA);
 
@@ -18,10 +21,9 @@ function send(res: http.ServerResponse, code: number, body: unknown, extra: Reco
 }
 
 function actorOf(req: http.IncomingMessage, body: Record<string, unknown>): string {
-  // Real identity must come from a verified session/proxy header in prod.
-  // V0: explicit body.actorId, or trusted proxy header, or single dev backdoor.
   const h = req.headers["x-piople-actor"];
   if (typeof h === "string" && h) return h;
+  if (AUTH_MODE === "proxy") throw new Error("missing-actor: proxy mode requires x-piople-actor");
   if (typeof body.actorId === "string" && body.actorId) return body.actorId;
   if (TEST_USER) return TEST_USER;
   throw new Error("missing-actor");
@@ -147,6 +149,21 @@ const server = http.createServer(async (req, res) => {
             resolvedAt: null,
           });
       broadcast(String(body.context), ev);
+      send(res, 200, { event: ev });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/v1/presence") {
+      const body = await readBody(req);
+      const actor = actorOf(req, body);
+      const ev = store.setPresence(actor, (body.state as "active" | "away" | "silent") ?? "active", body.echo === true);
+      send(res, 200, { event: ev });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/v1/promote") {
+      const body = await readBody(req);
+      const actor = actorOf(req, body);
+      const ev = store.promoteObservation(String(body.artifactId), actor, body.status === "refuted" ? "refuted" : "confirmed");
+      broadcast(ev.contextId, ev);
       send(res, 200, { event: ev });
       return;
     }

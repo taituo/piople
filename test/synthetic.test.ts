@@ -38,6 +38,25 @@ test("four actors, one case, full loop with idempotent replay", () => {
   s.close();
 });
 
+test("echo delegate may answer but never decide; hypotheses promote", () => {
+  const s = memStore();
+  s.upsertActor({ id: "human:alice", kind: "human", name: "alice" });
+  s.upsertActor({ id: "agent:scout", kind: "agent", name: "scout" });
+  s.createContext({ id: "case-e", kind: "case", title: "e", goal: "e", createdAt: Date.now() }, "human:alice");
+  s.join({ contextId: "case-e", actorId: "agent:scout", capabilities: ["read", "write"], joinedAt: Date.now() }, "j");
+  s.recordObservation({ id: "o1", contextId: "case-e", kind: "finding", authorId: "agent:scout", text: "h?", status: "hypothesis", evidence: [], createdAt: Date.now() });
+  s.promoteObservation("o1", "human:alice", "confirmed");
+  const row = s.db.prepare(`SELECT status FROM artifacts WHERE id='o1'`).get() as { status: string };
+  assert.equal(row.status, "confirmed");
+  assert.throws(() => s.promoteObservation("o1", "agent:stranger", "refuted"), /not-a-member/);
+  s.requestDecision({ id: "d1", contextId: "case-e", question: "q?", options: ["yes", "no"], requestedBy: "agent:scout", decidedBy: null, answer: null, status: "open", createdAt: Date.now(), resolvedAt: null });
+  s.setPresence("human:alice", "away", true);
+  assert.throws(() => s.resolveDecision("case-e", "human:alice", "k", "d1", "yes"), /echo delegate may never decide/);
+  s.setPresence("human:alice", "active", false);
+  s.resolveDecision("case-e", "human:alice", "k", "d1", "yes");
+  s.close();
+});
+
 test("invited expert answers without membership; stranger cannot", () => {
   const s = memStore();
   s.upsertActor({ id: "human:alice", kind: "human", name: "alice" });

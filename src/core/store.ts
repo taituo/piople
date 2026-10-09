@@ -45,6 +45,12 @@ CREATE TABLE pi_convs (
   context_id TEXT NOT NULL, actor_id TEXT NOT NULL, conv_id INTEGER NOT NULL,
   PRIMARY KEY (context_id, actor_id));
 `,
+  // Migration 4: presence. Global per actor; echo never decides.
+  `
+CREATE TABLE presence (
+  actor_id TEXT PRIMARY KEY, state TEXT NOT NULL, echo INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL);
+`,
 ];
 
 export class Store {
@@ -174,9 +180,32 @@ export class Store {
 
   resolveDecision(contextId: Id, actorId: Id, key: string, decisionId: Id, answer: string): PiopleEvent {
     this.mustMember(contextId, actorId, "decide");
+    const pres = this.db.prepare(`SELECT echo FROM presence WHERE actor_id=?`).get(actorId) as { echo: number } | undefined;
+    if (pres?.echo) throw new Error(`forbidden: echo delegate may never decide`);
     const info = this.db.prepare(`UPDATE decisions SET status='resolved', decided_by=?, answer=?, resolved_at=? WHERE id=? AND context_id=? AND status='open'`).run(actorId, answer, Date.now(), decisionId, contextId);
     if (info.changes !== 1) throw new Error(`decision-not-open: ${decisionId}`);
     return this.append({ type: "decision.resolved", contextId, actorId, key, data: { decisionId, answer } });
+  }
+
+  setPresence(actorId: Id, state: "active" | "away" | "silent", echo: boolean): PiopleEvent | null {
+    this.db.prepare(`INSERT INTO presence(actor_id,state,echo,updated_at) VALUES(?,?,?,?) ON CONFLICT(actor_id) DO UPDATE SET state=excluded.state, echo=excluded.echo, updated_at=excluded.updated_at`).run(
+      actorId, state, echo ? 1 : 0, Date.now(),
+    );
+    // Presence is global; log it in every shared context of the actor so members see it.
+    const ctxs = this.db.prepare(`SELECT context_id FROM members WHERE actor_id=?`).all(actorId) as Array<{ context_id: string }>;
+    let last: PiopleEvent | null = null;
+    for (const c of ctxs) {
+      last = this.append({ type: "presence.changed", contextId: c.context_id, actorId, key: `presence:${actorId}:${Date.now()}`, data: { state, echo } });
+    }
+    return last;
+  }
+
+  promoteObservation(artifactId: Id, by: Id, status: "confirmed" | "refuted"): PiopleEvent {
+    const a = this.db.prepare(`SELECT context_id, author_id FROM artifacts WHERE id=?`).get(artifactId) as { context_id: string; author_id: string } | undefined;
+    if (!a) throw new Error(`unknown-artifact: ${artifactId}`);
+    this.mustMember(a.context_id, by, "write");
+    this.db.prepare(`UPDATE artifacts SET status=? WHERE id=?`).run(status, artifactId);
+    return this.append({ type: "observation.promoted", contextId: a.context_id, actorId: by, key: `promote:${artifactId}:${status}`, data: { artifactId, status } });
   }
 
   append(e: { type: EventType; contextId: string; actorId: string; key: string; data: Record<string, unknown> }): PiopleEvent {

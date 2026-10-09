@@ -87,3 +87,11 @@ every refusal. Identity header `x-piople-actor` is trusted dev-only
   Expert explicitly could not see the other history — isolation holds.
   Protocol: invited experts may answer without membership
   (`isInvitedExpert`), strangers still blocked (tested).
+- **E (identity + presence)**: `PIO_AUTH_MODE=proxy` — identity only from
+  `x-piople-actor`, body spoof rejected (`test/auth.test.ts` spawns the
+  server in both modes). `presence` (migration 4, global per actor):
+  echo delegates may answer but never decide (enforced in
+  `resolveDecision`, live-verified: alice away+echo → blocked, bob decided).
+  `observation.promoted` moves hypothesis→confirmed/refuted with provenance.
+  Live E3 (alice+bob+scout, no model cost): 10 events, all gates held.
+  Tests 12/12.

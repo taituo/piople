@@ -37,6 +37,8 @@ export const EVENT_TYPES = [
   "decision.resolved",
   "action.proposed",
   "action.executed",
+  "presence.changed",
+  "observation.promoted",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
@@ -76,4 +78,13 @@ export type Decision = {
   status: DecisionStatus;
   createdAt: number;
   resolvedAt: number | null;
+};
+
+export type PresenceState = "active" | "away" | "silent";
+export type Presence = {
+  actorId: Id;
+  state: PresenceState;
+  /** echo: away human whose delegate may answer questions, but never decide. */
+  echo: boolean;
+  updatedAt: number;
 };
