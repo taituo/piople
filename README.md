@@ -95,3 +95,29 @@ every refusal. Identity header `x-piople-actor` is trusted dev-only
   `observation.promoted` moves hypothesis→confirmed/refuted with provenance.
   Live E3 (alice+bob+scout, no model cost): 10 events, all gates held.
   Tests 12/12.
+
+## C — DONE: first measured world effect (2026-10-09)
+
+- Operator instruction `tee kaikki` taken as approval for the demo-namespace fix.
+- Copied `case-full-1` out of archive, resolved its first proposal's decision
+  `yes` as human:alice, ran `executeIfApproved` with `PIO_ALLOW_WRITE=1`:
+  `configmap/checkout-config patched` (`0→10`).
+- Operator (outside the gate, logged): `rollout restart`, `rollout status`
+  successful, new pod Running, logs `database pool ready: 10 connections`.
+- Verification + proposal promotion recorded back in the case (18 events).
+- Revert if ever needed: patch `POOL_SIZE` back, rollout restart.
+
+## F — DONE (minimal): case brief
+
+- `scripts/brief-case.ts`: compacts a context's log into a `result` artifact
+  (TAVOITE/VAHVISTETTU/AVOINNA/PÄÄTÖKSET) with event-count provenance.
+  Live brief of `case-full-1` was honest about disagreements and missing logs.
+- Full OptChat deferred: briefs + digests cover current history sizes.
+
+## G — DONE (minimal): MCP stdio
+
+- `src/mcp/server.ts`: dependency-free JSON-RPC stdio, tools
+  `piople_events/post/observe/answer` on the same Store rules.
+  Identity from env `PIO_MCP_ACTOR` (no spoof arg); non-member reads rejected.
+  Live-smoked incl. the stranger case. Slack/Teams need credentials we don't
+  have — left out deliberately.
