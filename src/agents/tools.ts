@@ -14,9 +14,7 @@ const ALLOWED_RES = new Set(["configmap", "configmaps", "deployment", "deploymen
 export type ToolResult = { ok: boolean; output: string };
 
 export function describeTools(): string {
-  return `Tools (reply with exactly one line TOOLCALL <json> to use, max 3 per turn):
-{"tool":"k8s","verb":"get|describe|logs","res":"configmap|deployment|pod|service|events","name?":string,"ns":"demo-apps","tail?":number}
-{"tool":"repo","op":"ls|read","path":"src/...","lines?":number}`;
+  return "You have read-only tools k8s (kubectl get|describe|logs in demo-apps) and repo (ls|read the project source), plus observe and propose.";
 }
 
 /** Checkout root, derived from this file so the tool works wherever the repo lives. */

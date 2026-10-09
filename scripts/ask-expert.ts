@@ -30,7 +30,7 @@ const MODEL = process.env.PIO_MODEL ?? "deepseek-v4-flash";
 const s = new Store(DATA);
 const bearer = readBearer();
 const now = Date.now();
-const d = await openDurable(DATA + ".pi.sqlite", createGateway(BASE, bearer, [MODEL]).models);
+const d = await openDurable(DATA + ".pi.sqlite", createGateway(BASE, bearer, [MODEL]).models, s);
 
 // 1. Request lands in the origin case.
 const reqKey = `askx:${now}`;

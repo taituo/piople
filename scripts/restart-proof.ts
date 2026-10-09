@@ -21,7 +21,7 @@ async function phase1() {
     s.createContext({ id: "case-r", kind: "case", title: "restart", goal: "prove durability", createdAt: Date.now() }, "agent:scout");
   } catch { /* exists */ }
   s.join({ contextId: "case-r", actorId: "agent:scout", capabilities: ["read", "write"], joinedAt: Date.now() }, "j1");
-  const d = await openDurable(DB + ".pi.sqlite", gw());
+  const d = await openDurable(DB + ".pi.sqlite", gw(), s);
   const conv = await ensureConv(d, s, "case-r", "agent:scout", "You are scout. Answer in one short sentence.", { provider: "piople", modelId: MODEL });
   const convId = Number(conv.id);
   const r1 = await askConv(d, conv, "Remember the word JUNIPER. Reply OK.", "req-1");
@@ -33,7 +33,7 @@ async function phase1() {
 
 async function phase2(convId: number) {
   const s = new Store(DB);
-  const d = await openDurable(DB + ".pi.sqlite", gw());
+  const d = await openDurable(DB + ".pi.sqlite", gw(), s);
   const conv = await ensureConv(d, s, "case-r", "agent:scout", "You are scout.", { provider: "piople", modelId: MODEL });
   console.log(`phase2 conv=${Number(conv.id)} same=${Number(conv.id) === convId}`);
   // Same requestId again: must not duplicate work.

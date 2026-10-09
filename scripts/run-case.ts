@@ -45,24 +45,20 @@ for (const [actor, caps] of [[agents[0]!.actorId, ["read", "write"]], [agents[1]
 }
 s.postMessage(CTX, "human:alice", `kickoff:${now}`, KICKOFF);
 
-const USE_DURABLE = process.argv.includes("--durable");
-const durable = USE_DURABLE ? await openDurable(DATA + ".pi.sqlite", createGateway(BASE, bearer, [MODEL]).models) : undefined;
+const durable = await openDurable(DATA + ".pi.sqlite", createGateway(BASE, bearer, [MODEL]).models, s);
 const convs = new Map<string, Awaited<ReturnType<typeof ensureConv>>>();
-if (durable) {
-  for (const a of agents) {
-    convs.set(a.actorId, await ensureConv(durable, s, CTX, a.actorId, fullSystem(a.system), { provider: "piople", modelId: MODEL }));
-  }
+for (const a of agents) {
+  convs.set(a.actorId, await ensureConv(durable, s, CTX, a.actorId, fullSystem(a.system), { provider: "piople", modelId: MODEL }));
 }
 let totalIn = 0, totalOut = 0, toolCalls = 0, proposals = 0;
 for (let round = 0; round < ROUNDS; round++) {
   for (const a of agents) {
-    const conv = convs.get(a.actorId);
-    const r = await agentTurn(s, { ...a, contextId: CTX, model: MODEL, baseUrl: BASE, bearer, maxTokens: 400, ...(durable && conv ? { durable: { d: durable, conv } } : {}) });
-    const u = r.usage as { prompt_tokens?: number; completion_tokens?: number };
-    totalIn += u.prompt_tokens ?? 0;
-    totalOut += u.completion_tokens ?? 0;
+    const r = await agentTurn(s, { actorId: a.actorId, contextId: CTX, durable: { d: durable, conv: convs.get(a.actorId)! } });
+    const u = r.usage;
+    totalIn += u.prompt_tokens;
+    totalOut += u.completion_tokens;
     toolCalls += r.toolCalls;
-    if (r.text.startsWith("Proposed action")) proposals++;
+    proposals += r.proposals;
     console.log(`--- ${a.actorId} [${r.kind} tools=${r.toolCalls}] tokens=${u.prompt_tokens}+${u.completion_tokens}\n${r.text.slice(0, 500)}\n`);
   }
 }
@@ -70,5 +66,5 @@ s.requestDecision({ id: `d-${now}`, contextId: CTX, question: "Hyväksytäänkö
 console.log(`RUN db=${DATA} case=${CTX} model=${MODEL} rounds=${ROUNDS} tokens=${totalIn}+${totalOut} toolCalls=${toolCalls} proposals=${proposals}`);
 s.finishRun(runId, { tokensIn: totalIn, tokensOut: totalOut, toolCalls, proposals, outcome: "done" });
 console.log(`Events: ${s.eventsSince(CTX, 0, 1000).length}. Human: resolve with resolveDecision().`);
-await durable?.close();
+await durable.close();
 s.close();

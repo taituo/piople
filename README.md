@@ -11,10 +11,13 @@ assistance.requested/answered, decision.requested/resolved, action.proposed/exec
 
 ```
 src/core/    Store (SQLite, migrations), types — imports only itself + node:*
-src/agents/  loop.ts (turn: read context → gateway → write back),
-             tools.ts (read-only kubectl allowlist), executor.ts (gated writes)
+src/agents/  loop.ts (turn edge: read case → Pi conversation → post reply),
+             pi-tools.ts (Pi extension: k8s, repo, observe, propose),
+             durable.ts (one durable Pi conversation per context+actor),
+             tools.ts (read-only allowlists), executor.ts (gated writes)
 src/http/    server.ts (node:http JSON + SSE, same rules as the core)
-test/        synthetic, tools (allowlist), approval (gate), runs (ledger)
+test/        synthetic, tools (allowlist), approval (gate), runs (ledger),
+             agent (Pi tool loop with a scripted faux model, offline)
 scripts/     run-case.ts — unified runner, see --help-ish args in file
 data/        live DBs; data/archive/ — frozen V1–V3 runs, keep readable, don't write
 ```
@@ -26,7 +29,7 @@ Gateway bearer: `PIO_GATEWAY_BEARER`, or the file in `PIO_BEARER_FILE`.
 ```sh
 npm install
 npm test && npm run typecheck
-node scripts/run-case.ts --db ./data/case.sqlite --case case-checkout-2 --rounds 3
+node scripts/run-case.ts --db ./data/case.sqlite --case case-checkout-2 --rounds 3   # needs the gateway
 PIO_PORT=8899 PIO_DATA=./data/piople.sqlite node src/http/server.ts
 ```
 
@@ -139,4 +142,13 @@ No new core concepts; reliability limits only.
   for its bound decision, once after success; refusals/failures never shadow a retry.
 - Repo tool roots derive from the checkout (symlinks resolved); HTTP body capped at 1 MiB,
   inputs validated, SSE/`/events` follow the auth mode; MCP ignores notifications.
-- Still open: `loop.ts` text protocol (`TOOLCALL`/`PROPOSE`) should move to Pi-native tools.
+- **Pi owns the agent loop** (the conversation's own advice: no second harness). The
+  `TOOLCALL`/`PROPOSE`/`OBS:` text protocol, the 3-round tool loop and the raw chat path are
+  gone. Tools are a Pi extension (`pi-tools.ts`); Pi validates arguments, runs each call as a
+  durable replay-safe task and resumes after a crash. Identity is never a tool argument: the
+  conversation id resolves to (context, actor) via `pi_convs`, and every tool goes through the
+  Store, so rights are enforced there. `test/agent.test.ts` proves it offline with pi-ai's faux
+  provider. `run-case.ts` is always durable now (the `--durable` flag is gone).
+- Next, per the design conversation: one real task that is not Kubernetes (a real repo + tests),
+  two Pi agents + a human, case memory instead of shared channels. No new core concepts until
+  that task shows one is missing.

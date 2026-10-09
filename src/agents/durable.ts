@@ -3,7 +3,8 @@ import { Harness, createRegistry, type Conversation } from "@earendil-works/pi-d
 import type { Models } from "@earendil-works/pi-ai";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { Store } from "../core/index.ts";
-import { sanitize } from "./loop.ts";
+import { sanitize } from "./sanitize.ts";
+import { pioupleExtension } from "./pi-tools.ts";
 
 /**
  * H1: one durable Pi conversation per (context, actor).
@@ -18,11 +19,14 @@ export type Durable = {
   close(): Promise<void>;
 };
 
-export async function openDurable(piDbPath: string, models: Models): Promise<Durable> {
+/** Opens Pi's storage and installs the piople tool extension bound to `store`. */
+export async function openDurable(piDbPath: string, models: Models, store: Store): Promise<Durable> {
   const storage = await openNodeSqliteStorage(piDbPath);
+  const registry = createRegistry();
+  registry.install(pioupleExtension(store));
   const harness = await Harness.open(storage, {
     models,
-    registry: createRegistry(),
+    registry,
     settings: { retry: { maxRetries: 1 } },
   } as never, BACKGROUND_CONTEXT);
   harness.resume();
@@ -57,25 +61,29 @@ export async function ensureConv(
   return conv;
 }
 
-/** Submit one user message, wait until idle, return newest assistant text + usage. */
-export async function askConv(
-  d: Durable,
-  conv: Conversation,
-  text: string,
-  requestId: string,
-): Promise<{ text: string; usage: { prompt_tokens: number; completion_tokens: number } }> {
+export type AskResult = {
+  /** Final answer: the text of the last assistant entry of the run (tool-call turns excluded). */
+  text: string;
+  /** Names of the tools Pi ran during this run, in call order. */
+  tools: string[];
+  usage: { prompt_tokens: number; completion_tokens: number };
+};
+
+/** Submit one user message, wait until idle (Pi runs the whole tool loop), return the final answer + usage. */
+export async function askConv(d: Durable, conv: Conversation, text: string, requestId: string): Promise<AskResult> {
   const before = await lastAssistantId(d, conv);
   const u0 = await sumUsage(d);
   await conv.submit({ type: "input", content: text, requestId } as never, BACKGROUND_CONTEXT);
   await conv.waitForIdle(BACKGROUND_CONTEXT);
   const u1 = await sumUsage(d);
-  let { text: reply } = await newestAssistantSince(d, conv, before);
-  if (!reply) {
+  let run = await assistantRunSince(conv, before);
+  if (!run.text && !run.tools.length) {
     // Duplicate requestId: no new work happened; return the latest existing reply.
-    reply = (await newestAssistantSince(d, conv, 0)).text;
+    run = await assistantRunSince(conv, 0);
   }
   return {
-    text: sanitize(reply),
+    text: sanitize(run.text),
+    tools: run.tools,
     usage: { prompt_tokens: u1.input - u0.input, completion_tokens: u1.output - u0.output },
   };
 }
@@ -90,31 +98,32 @@ async function sumUsage(d: Durable): Promise<{ input: number; output: number }> 
   return { input, output };
 }
 
-async function lastAssistantId(d: Durable, conv: Conversation): Promise<number> {
-  void d;
+async function lastAssistantId(_d: Durable, conv: Conversation): Promise<number> {
   const page = await conv.entries({}, 50, undefined, BACKGROUND_CONTEXT);
   const items = (page as unknown as { items: Array<{ id: number; kind: string }> }).items;
   const ids = items.filter((e) => e.kind === "pi.assistant").map((e) => Number(e.id));
   return ids.length ? Math.max(...ids) : 0;
 }
 
-async function newestAssistantSince(d: Durable, conv: Conversation, after: number): Promise<{ text: string }> {
-  void d;
+async function assistantRunSince(conv: Conversation, after: number): Promise<{ text: string; tools: string[] }> {
   const page = await conv.entries({ minEntryId: after + 1 } as never, 50, undefined, BACKGROUND_CONTEXT);
   const items = (page as unknown as { items: Array<{ id: number; kind: string; model?: Array<{ content?: unknown }> }> }).items
     .filter((e) => e.kind === "pi.assistant" && Number(e.id) > after)
     .sort((a, b) => Number(a.id) - Number(b.id));
-  const parts: string[] = [];
+  let text = "";
+  const tools: string[] = [];
   for (const e of items) {
     const c = e.model?.[0]?.content as Array<{ type: string; text?: string; name?: string }> | string | undefined;
+    const parts: string[] = [];
     if (typeof c === "string") parts.push(c);
     else if (Array.isArray(c)) {
       for (const b of c) {
         if (b.type === "text" && b.text) parts.push(b.text);
-        else if (b.type === "toolCall") parts.push(`[called ${b.name}]`);
+        else if (b.type === "toolCall" && b.name) tools.push(b.name);
       }
     }
+    const joined = parts.join("\n").trim();
+    if (joined) text = joined;
   }
-  // Usage: newest entry wins; Pi is the counter (harness.usage is global, not per-turn).
-  return { text: parts.join("\n").trim() };
+  return { text, tools };
 }
