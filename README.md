@@ -68,5 +68,11 @@ every refusal. Identity header `x-piople-actor` is trusted dev-only
 - Proof: `case-pi-1`, 2 rounds, `deepseek-v4-flash` — 9 tool calls,
   3 well-formed `patch checkout-config POOL_SIZE→10` proposals with bound
   decisions, ledger row `4071+2067` tokens. Tests 7/7, `tsc` clean.
-- Remaining Pi work: Durable `Harness` for persistent conversations (B2);
-  the turn loop still rebuilds context from our events each call.
+- **H (Durable conversations)**: `src/agents/durable.ts` — one persistent Pi
+  conversation per (context, actor) on `openNodeSqliteStorage`, binding in
+  `pi_convs` (migration 3). `run-case.ts --durable` sends only the newest
+  user message per round; Pi holds the history. Restart proof
+  (`scripts/restart-proof.ts`): full close+reopen → same conv id, same
+  requestId resubmits without duplicating work, `JUNIPER` remembered across
+  restart, protocol events intact. Known wart: duplicate-requestId resubmit
+  returns empty text instead of the original reply (no-op, fix later).

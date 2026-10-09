@@ -12,7 +12,9 @@
     "test": "node --test test/*.test.ts"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "^1.0.4"
+    "@earendil-works/chord": "^1.0.4",
+    "@earendil-works/pi-ai": "^1.0.4",
+    "@earendil-works/pi-durable": "^1.0.4"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",

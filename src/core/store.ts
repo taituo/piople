@@ -39,6 +39,12 @@ CREATE TABLE runs (
   outcome TEXT NOT NULL DEFAULT 'running');
 CREATE INDEX runs_case ON runs(case_id, started_at);
 `,
+  // Migration 3: durable Pi conversation binding. Protocol owns the row; Pi owns the transcript.
+  `
+CREATE TABLE pi_convs (
+  context_id TEXT NOT NULL, actor_id TEXT NOT NULL, conv_id INTEGER NOT NULL,
+  PRIMARY KEY (context_id, actor_id));
+`,
 ];
 
 export class Store {

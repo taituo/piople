@@ -1,5 +1,7 @@
 import { Store } from "../src/core/index.ts";
 import { agentTurn, readBearer } from "../src/agents/loop.ts";
+import { createGateway } from "../src/agents/pi-provider.ts";
+import { openDurable, ensureConv } from "../src/agents/durable.ts";
 
 /**
  * Unified case runner (replaces run-v1.ts / run-v2.ts).
@@ -43,10 +45,19 @@ const agents = [
   { actorId: "agent:scout", system: "Olet scout: tutkit havaintoja, epäilet oletuksia, pyydät tarkennuksia." },
   { actorId: "agent:builder", system: "Olet builder: ehdotat konkreettista korjausta ja kerrot miten se testataan." },
 ];
+const USE_DURABLE = process.argv.includes("--durable");
+const durable = USE_DURABLE ? await openDurable(DATA + ".pi.sqlite", createGateway(BASE, bearer, [MODEL]).models) : undefined;
+const convs = new Map<string, Awaited<ReturnType<typeof ensureConv>>>();
+if (durable) {
+  for (const a of agents) {
+    convs.set(a.actorId, await ensureConv(durable, s, CTX, a.actorId, a.system, { provider: "piople", modelId: MODEL }));
+  }
+}
 let totalIn = 0, totalOut = 0, toolCalls = 0, proposals = 0;
 for (let round = 0; round < ROUNDS; round++) {
   for (const a of agents) {
-    const r = await agentTurn(s, { ...a, contextId: CTX, model: MODEL, baseUrl: BASE, bearer, maxTokens: 400 });
+    const conv = convs.get(a.actorId);
+    const r = await agentTurn(s, { ...a, contextId: CTX, model: MODEL, baseUrl: BASE, bearer, maxTokens: 400, ...(durable && conv ? { durable: { d: durable, conv } } : {}) });
     const u = r.usage as { prompt_tokens?: number; completion_tokens?: number };
     totalIn += u.prompt_tokens ?? 0;
     totalOut += u.completion_tokens ?? 0;
@@ -59,4 +70,5 @@ s.requestDecision({ id: `d-${now}`, contextId: CTX, question: "Hyväksytäänkö
 console.log(`RUN db=${DATA} case=${CTX} model=${MODEL} rounds=${ROUNDS} tokens=${totalIn}+${totalOut} toolCalls=${toolCalls} proposals=${proposals}`);
 s.finishRun(runId, { tokensIn: totalIn, tokensOut: totalOut, toolCalls, proposals, outcome: "done" });
 console.log(`Events: ${s.eventsSince(CTX, 0, 1000).length}. Human: resolve with resolveDecision().`);
+await durable?.close();
 s.close();

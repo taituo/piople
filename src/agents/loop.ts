@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import type { Models } from "@earendil-works/pi-ai";
+import type { Conversation } from "@earendil-works/pi-durable";
 import { Store } from "../core/index.ts";
 import { describeTools, runTool } from "./tools.ts";
 import { createGateway, textOf } from "./pi-provider.ts";
+import { askConv, type Durable } from "./durable.ts";
 
 /**
  * B1: Pi owns model transport (pi-ai provider on the gateway).
@@ -19,6 +21,8 @@ export type AgentConfig = {
   maxTokens: number;
   /** Injected Pi models (tests). Built from baseUrl/bearer/model when absent. */
   pi?: Models;
+  /** Durable conversation: when set, turns go through Pi (history persists). */
+  durable?: { d: Durable; conv: Conversation };
 };
 
 export function readBearer(path = "/home/tiny/.config/opencode-go-gateway/gateway-bearer"): string {
@@ -30,8 +34,7 @@ export function sanitize(text: string): string {
   return text.replace(/<[a-zA-Z_|][a-zA-Z0-9_|]*>/g, "");
 }
 
-export function contextPrompt(s: Store, contextId: string, goal: string, lastN = 30): string {
-  const events = s.eventsSince(contextId, 0, 500).slice(-lastN);
+export function contextPrompt(s: Store, contextId: string, goal: string, lastN = 30): string {  const events = s.eventsSince(contextId, 0, 500).slice(-lastN);
   const lines = events.map((e) => {
     const d = e.data as Record<string, unknown>;
     const text = String(d.text ?? d.question ?? d.answer ?? d.observation ?? JSON.stringify(d)).slice(0, 400);
@@ -45,8 +48,14 @@ export function contextPrompt(s: Store, contextId: string, goal: string, lastN =
   return `Goal: ${goal}\n\n${digest}Shared history (newest last):\n${lines.join("\n")}`;
 }
 
+let chatSeq = 0;
+
 async function chat(cfg: AgentConfig, messages: Array<{ role: string; content: string }>): Promise<{ text: string; usage: { prompt_tokens?: number; completion_tokens?: number } }> {
-  const pi = cfg.pi ?? createGateway(cfg.baseUrl, cfg.bearer, [cfg.model]).models;
+  if (cfg.durable) {    // Durable path: Pi holds the history; send only the newest user message.
+    const lastUser = [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
+    const r = await askConv(cfg.durable.d, cfg.durable.conv, lastUser, `turn:${cfg.actorId}:${Date.now()}:${chatSeq++}`);
+    return { text: r.text, usage: r.usage };
+  }  const pi = cfg.pi ?? createGateway(cfg.baseUrl, cfg.bearer, [cfg.model]).models;
   const model = pi.getModel("piople", cfg.model);
   if (!model) throw new Error(`model not registered: ${cfg.model}`);
   const system = messages.find((m) => m.role === "system")?.content ?? "";
