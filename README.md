@@ -56,9 +56,17 @@ every refusal. Identity header `x-piople-actor` is trusted dev-only
 - **A**: git history from here; unified `run-case.ts`; `runs` ledger;
   `turn:` key prefix. No model calls spent in A.
 
-## Next (B)
+## Next (B) — DONE: Pi owns transport
 
-Replace the `fetch` loop with pi-ai `local`-provider on the same gateway,
-then Pi Durable `Harness` for persistent conversations. Protocol unchanged;
-the `fetch` path is deleted once Harness proves the same case.
-Kill criterion is written before the swap starts.
+- `src/agents/pi-provider.ts`: pi-ai `local`-provider on the same gateway
+  (pinned `@earendil-works/pi-ai@1.0.4`, like Entropi). `loop.ts` `chat()`
+  goes through `models.completeSimple`; raw `fetch` path deleted.
+- Three pi-ai 1.0.4 quirks found by bisecting and worked around in our layer:
+  `sanitize()` strips model control-token leakage (`<ds_s>`) before parsing;
+  assistant messages sent as `[{type:"text",text}]` blocks (string form
+  crashes the converter); `timestamp` omitted (breaks request building).
+- Proof: `case-pi-1`, 2 rounds, `deepseek-v4-flash` — 9 tool calls,
+  3 well-formed `patch checkout-config POOL_SIZE→10` proposals with bound
+  decisions, ledger row `4071+2067` tokens. Tests 7/7, `tsc` clean.
+- Remaining Pi work: Durable `Harness` for persistent conversations (B2);
+  the turn loop still rebuilds context from our events each call.
