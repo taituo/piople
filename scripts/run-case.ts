@@ -66,7 +66,7 @@ for (let round = 0; round < ROUNDS; round++) {
     console.log(`--- ${a.actorId} [${r.kind} tools=${r.toolCalls}] tokens=${u.prompt_tokens}+${u.completion_tokens}\n${r.text.slice(0, 500)}\n`);
   }
 }
-s.requestDecision({ id: `d-${now}`, contextId: CTX, question: "Hyväksytäänkö agenttien ehdotus jatkoselvitykseen?", options: ["yes", "no"], requestedBy: "agent:builder", decidedBy: null, answer: null, status: "open", createdAt: Date.now(), resolvedAt: null });
+s.requestDecision({ id: `d-${now}`, contextId: CTX, question: "Hyväksytäänkö agenttien ehdotus jatkoselvitykseen?", options: ["yes", "no"], requestedBy: agents[1]!.actorId, decidedBy: null, answer: null, status: "open", createdAt: Date.now(), resolvedAt: null });
 console.log(`RUN db=${DATA} case=${CTX} model=${MODEL} rounds=${ROUNDS} tokens=${totalIn}+${totalOut} toolCalls=${toolCalls} proposals=${proposals}`);
 s.finishRun(runId, { tokensIn: totalIn, tokensOut: totalOut, toolCalls, proposals, outcome: "done" });
 console.log(`Events: ${s.eventsSince(CTX, 0, 1000).length}. Human: resolve with resolveDecision().`);
