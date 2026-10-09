@@ -35,6 +35,7 @@ export const EVENT_TYPES = [
   "assistance.answered",
   "decision.requested",
   "decision.resolved",
+  "decision.expired",
   "action.proposed",
   "action.executed",
   "presence.changed",
@@ -66,7 +67,7 @@ export type Artifact = {
   createdAt: number;
 };
 
-export type DecisionStatus = "open" | "resolved";
+export type DecisionStatus = "open" | "resolved" | "expired";
 export type Decision = {
   id: Id;
   contextId: Id;
@@ -78,6 +79,8 @@ export type Decision = {
   status: DecisionStatus;
   createdAt: number;
   resolvedAt: number | null;
+  /** After this time the decision can no longer be taken: silence is never consent. */
+  expiresAt?: number | null;
 };
 
 export type PresenceState = "active" | "away" | "silent";

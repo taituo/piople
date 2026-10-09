@@ -1,7 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import type { Store } from "../core/index.ts";
-import type { World } from "../sim/world.ts";
 import { runTool } from "./tools.ts";
 
 /**
@@ -16,10 +15,16 @@ import { runTool } from "./tools.ts";
  * All tools are replay-safe: Store writes are keyed by the call id, so a rerun after a
  * crash returns the original event instead of duplicating it.
  */
+/** What the `world` tool needs from a simulated world; src/sim/world.ts implements it. */
+export interface WorldView {
+  ls(prefix?: string): string[];
+  read(path: string, maxLines?: number): string | undefined;
+  grep(pattern: string, prefix?: string): string[];
+}
 export type ToolDenied = { contextId: string; actorId: string; tool: string };
 export type PiopleToolOptions = {
   /** Source of the sandboxed world for a case (simulations); absent: the world tool reports no world. */
-  world?: (contextId: string) => World | undefined;
+  world?: (contextId: string) => WorldView | undefined;
   /** Whether `actorId` may call `tool` in `contextId`. Default: everyone may call every tool. */
   allow?: (contextId: string, actorId: string, tool: string) => boolean;
   onDenied?: (d: ToolDenied) => void;

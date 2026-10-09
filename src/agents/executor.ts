@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { Store } from "../core/index.ts";
+import { Store, failpoint } from "../core/index.ts";
 import { allowedNamespaces } from "./tools.ts";
 
 /**
@@ -17,7 +17,11 @@ export type Action = Record<string, unknown>;
 export type Adapter = {
   /** Return an error string to refuse the action, or null to accept it. */
   check(action: Action): string | null;
-  run(action: Action): Promise<{ ok: boolean; output: string }>;
+  /**
+   * Do it. `idempotencyKey` is stable across retries of the same proposal: an adapter must never apply one
+   * key twice, because the process can die after the effect and before piople records it.
+   */
+  run(action: Action, ctx: { idempotencyKey: string }): Promise<{ ok: boolean; output: string }>;
   /** Human-readable dry-run description. */
   describe(action: Action): string;
 };
@@ -48,6 +52,7 @@ export const kubectlAdapter: Adapter = {
 export const DEFAULT_ADAPTERS: Record<string, Adapter> = { kubectl: kubectlAdapter };
 
 /**
+ * Exactly-once, in two halves: the adapter dedups the effect by idempotency key, piople dedups the record by event key.
  * The action to run is read from the stored `action.proposed` event, never from the
  * caller: what a human approved is exactly what executes. After a success a repeated call
  * returns the recorded outcome without touching the world. Refusals and failures are logged
@@ -86,7 +91,8 @@ export async function executeIfApproved(
   }
   const bad = adapter.check(action);
   if (bad) return refuse(`refused: ${bad}`);
-  const result = await adapter.run(action);
+  const result = await adapter.run(action, { idempotencyKey: okKey });
+  failpoint("exec:after-run"); // crash window: the world changed, piople has not recorded it yet
   s.recordExecution(contextId, executorId, result.ok ? okKey : `exec-failed:${proposalId}:${randomUUID()}`, proposalId, decisionId, result.ok, result.output);
   return { ran: result.ok, output: result.output };
 }

@@ -25,7 +25,7 @@ export function checkInvariants(s: Store, contextId: string, world: World | unde
 
   // every actor that wrote to the case is a member of it
   const members = new Map((s.db.prepare(`SELECT actor_id, capabilities FROM members WHERE context_id=?`).all(contextId) as Row[]).map((m) => [String(m.actor_id), JSON.parse(String(m.capabilities)) as string[]]));
-  const outsiders = [...new Set(events.filter((e) => !members.has(e.actorId) && e.type !== "assistance.answered").map((e) => e.actorId))];
+  const outsiders = [...new Set(events.filter((e) => !members.has(e.actorId) && e.type !== "assistance.answered" && e.actorId !== "system").map((e) => e.actorId))];
   add("only-members-act", "safety", outsiders.map((a) => `${a} acted without membership`));
 
   // proposals are bound to a decision request

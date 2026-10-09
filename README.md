@@ -18,9 +18,11 @@ src/agents/  loop.ts (turn edge: read case → Pi conversation → post reply),
              pi-tools.ts (Pi extension: k8s, repo, observe, propose),
              durable.ts (one durable Pi conversation per context+actor),
              tools.ts (read-only allowlists), executor.ts (gated writes)
-src/http/    server.ts (node:http JSON + SSE, same rules as the core)
+src/http/    app.ts (createApp: node:http JSON + SSE, in-process testable), server.ts (main)
 test/        synthetic, tools, approval, runs, auth, agent (Pi tool loop), restart,
-             sim (every scenario file, validation, invariants catch violations)
+             sim (every scenario file, validation, invariants catch violations),
+             rights-matrix (role x operation, Store and HTTP), http (hostile input, races),
+             crash (SIGKILL at failpoints), architecture (import rules, pins, event list), prompt
 scripts/     simulate.ts (scenario runner), ask-expert.ts, brief-case.ts
 data/        live DBs; data/archive/ — frozen V1–V3 runs, keep readable, don't write
 ```
@@ -182,3 +184,41 @@ No new core concepts; reliability limits only.
 - Next, per the design conversation: one real task that is not Kubernetes (a real repo + tests),
   two Pi agents + a human, case memory instead of shared channels. No new core concepts until
   that task shows one is missing.
+
+## What was taken from CrewPi and Entropi (and what was left)
+
+Read both end to end (2026-10-09), compared with what piople already had, and took only what closed a
+real gap, each with a test that fails without it.
+
+**From Entropi**
+- `canDecide`: only a human decides; never the requester (separation of duties); the person must be
+  present, so away/silent humans with or without an echo delegate are refused; the answer must be one
+  of the options; a finished decision answers "conflict" before rights; decisions can **expire** and
+  silence is never consent (`decision.expired`, `expireDue()`).
+- Access **matrix** as a table (every role x every operation) run against the Store *and* the HTTP app,
+  because the API is not the only way in. It found real holes: anyone could answer assistance without
+  `write`, an agent could grant access, and re-joining a member could strip their rights.
+- **Crash matrix**: real SIGKILLs at named failpoints (`PIO_FAILPOINT`) inside a transaction and between
+  an external effect and its record; the next life converges with every effect exactly once. Adapters get
+  a stable idempotency key (`Adapter.run(action, {idempotencyKey})`): "a source never runs one key twice".
+- **Architecture as tests**: who may import whom, nobody but the core touches protocol tables, Pi packages
+  pinned to exact versions (Pi Durable is experimental), the event list and HTTP surface pinned.
+- **Input hardening** at the door (types, sizes, prototype keys, odd methods: always a plain 4xx, never a
+  500) and `createApp` so it is tested in-process. Unknown case and "not your case" look the same.
+- `focus`: `GET /api/v1/focus` = the decisions *you* could take right now (what needs me).
+- Runaway protection for asking outside help, counted from the log: no repeating the same ask, a cap per
+  case per 10 minutes.
+
+**From CrewPi**
+- History shown to an agent is **data, not instructions** (its memory rule): one line per event, control
+  characters stripped, an explicit frame, so a log line cannot fake structure or give orders.
+- A **budget guard**, run-time: scenario `limits` (tokens, seconds, per-turn timeout) stop and fail a live
+  run before it can spend past them.
+- Its `incidentWorkflow` (diagnose, plan, wait for a person, execute, verify, close) is kept in mind as the
+  fixed-pipeline *baseline* for the A/B experiment against free collaboration; not ported.
+
+**Left on purpose** (not needed by the one real task yet, and the design conversation says do not build
+ahead): OptChat / `memory_zoom`, Matrix/Slack/MCP adapters beyond the existing stdio one, sandboxes, Keycloak,
+Temporal, fake Jira/GitHub/CI integrations, the generative-UI spec (`render_ui`, worth porting when a view is
+needed), realms/policies as first-class objects (piople keeps the four concepts), the FrontDesk router, the
+soak tests.

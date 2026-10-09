@@ -69,6 +69,17 @@ test("a granted-tool list is enforced on every call, not suggested", async () =>
   assert.equal(r.verdict, "pass", JSON.stringify(r.expectations.filter((c) => !c.ok)));
 });
 
+test("runaway protection stops a run at its token limit and fails it, instead of spending on", async () => {
+  const s = structuredClone(raw("checkout-incident.json"));
+  s.limits = { maxTokens: 1 };
+  const r = await runScenario(parseScenario(s), { mode: "scripted" });
+  assert.equal(r.verdict, "fail");
+  assert.ok(r.errors.some((e) => /limit-exceeded: \d+ tokens/.test(e)), JSON.stringify(r.errors));
+  assert.equal(r.metrics.perActor["agent:builder"]!.turns, 0, "the builder never got a turn after the limit was hit");
+  s.limits = { maxTokens: 10_000_000, maxSeconds: 600, turnSeconds: 60 };
+  assert.equal((await runScenario(parseScenario(s), { mode: "scripted" })).verdict, "pass", "generous limits change nothing");
+});
+
 test("live mode refuses to start without a model and a gateway", async () => {
   const scn = loadScenario(path.join(DIR, "checkout-incident.json"));
   await assert.rejects(runScenario({ ...scn, model: undefined as never }, { mode: "live" }), /needs a model/);
@@ -94,6 +105,7 @@ const invalid: Array<[string, (s: Record<string, any>) => void, RegExp]> = [
   ["script for a human", (s) => { s.script["human:alice"] = []; }, /not an agent/],
   ["script with unknown tool", (s) => { s.script["agent:scout"][0].calls[0].tool = "nope"; }, /unknown tool "nope"/],
   ["expect with unknown event", (s) => { s.expect.events["thing.happened"] = { min: 1 }; }, /unknown event type/],
+  ["limits with a non-positive number", (s) => { s.limits = { maxTokens: 0 }; }, /limits.maxTokens/],
   ["min above max", (s) => { s.expect.findings.min = 9; s.expect.findings.max = 1; }, /min > max/],
   ["bad regex in world effect", (s) => { s.world.effects[0].when.matches = "("; }, /invalid regular expression/],
   ["no agents", (s) => { s.actors = s.actors.filter((a: any) => a.kind === "human"); s.script = {}; s.humanPosts = []; }, /at least one agent/],

@@ -52,6 +52,8 @@ export type Scenario = {
   /** Scripted (deterministic) agent behavior per actor, one entry per round. Absent: live-only scenario. */
   script?: Record<string, ScriptTurn[]>;
   expect: Expect;
+  /** Runaway protection for live runs: stop the whole run (and fail it) when any limit is hit. */
+  limits?: { maxTokens?: number; maxSeconds?: number; turnSeconds?: number };
 };
 
 type Obj = Record<string, unknown>;
@@ -85,7 +87,7 @@ function range(p: Problems, v: unknown, where: string, extra: readonly string[] 
 export function parseScenario(raw: unknown, where = "scenario"): Scenario {
   const p = new Problems();
   if (!isObj(raw)) throw new Error(`${where}: must be a JSON object`);
-  p.keys(raw, ["id", "title", "goal", "kickoff", "language", "rounds", "model", "world", "actors", "humanPosts", "decide", "script", "expect"], where);
+  p.keys(raw, ["id", "title", "goal", "kickoff", "language", "rounds", "model", "world", "actors", "humanPosts", "decide", "script", "expect", "limits"], where);
   const id = str(p, raw, "id", where) ?? "?";
   if (id !== "?" && !/^[a-z0-9][a-z0-9-]*$/.test(id)) p.add(`${where}.id: use lowercase letters, digits and dashes`);
   const title = str(p, raw, "title", where) ?? id;
@@ -245,12 +247,23 @@ export function parseScenario(raw: unknown, where = "scenario"): Scenario {
     }
   }
 
+  let limits: Scenario["limits"];
+  if (raw.limits !== undefined) {
+    const l = raw.limits;
+    if (!isObj(l)) p.add(`${where}.limits: must be an object`);
+    else {
+      p.keys(l, ["maxTokens", "maxSeconds", "turnSeconds"], `${where}.limits`);
+      for (const [k, v] of Object.entries(l)) if (typeof v !== "number" || !(v > 0)) p.add(`${where}.limits.${k}: must be a positive number`);
+      limits = l as NonNullable<Scenario["limits"]>;
+    }
+  }
+
   if (p.list.length) throw new Error(`invalid scenario ${id}:\n  - ${p.list.join("\n  - ")}`);
   return {
     id, title, goal, kickoff, language, rounds: rounds as number,
     ...(typeof raw.model === "string" ? { model: raw.model } : {}),
     ...(world ? { world } : {}),
-    actors, humanPosts, decide, ...(script ? { script } : {}), expect,
+    actors, humanPosts, decide, ...(script ? { script } : {}), expect, ...(limits ? { limits } : {}),
   };
 }
 

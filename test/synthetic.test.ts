@@ -95,7 +95,9 @@ test("replays return the original event for every mutation, not an error", () =>
   s.createContext({ id: "case-r", kind: "case", title: "r", goal: "r", createdAt: Date.now() }, "human:alice");
   const obs = { id: "o1", contextId: "case-r", kind: "finding" as const, authorId: "human:alice", text: "t", status: "hypothesis" as const, evidence: [], createdAt: Date.now() };
   assert.equal(s.recordObservation(obs).seq, s.recordObservation(obs).seq);
-  const dec = { id: "d1", contextId: "case-r", question: "q?", options: ["yes", "no"], requestedBy: "human:alice", decidedBy: null, answer: null, status: "open" as const, createdAt: Date.now(), resolvedAt: null };
+  s.upsertActor({ id: "agent:a", kind: "agent", name: "a" });
+  s.join({ contextId: "case-r", actorId: "agent:a", capabilities: ["read", "write"], joinedAt: Date.now() }, "ja");
+  const dec = { id: "d1", contextId: "case-r", question: "q?", options: ["yes", "no"], requestedBy: "agent:a", decidedBy: null, answer: null, status: "open" as const, createdAt: Date.now(), resolvedAt: null };
   assert.equal(s.requestDecision(dec).seq, s.requestDecision(dec).seq);
   const r1 = s.resolveDecision("case-r", "human:alice", "k", "d1", "yes");
   const r2 = s.resolveDecision("case-r", "human:alice", "k", "d1", "yes");
@@ -113,7 +115,7 @@ test("join cannot escalate: granter must be a member and can only grant what it 
   const at = (actorId: string, capabilities: string[]) => ({ contextId: "case-j", actorId, capabilities, joinedAt: Date.now() });
   assert.throws(() => s.join(at("agent:evil", ["read", "write", "decide"]), "j1", "agent:evil"), /not-a-member/);
   s.join(at("agent:scout", ["read", "write"]), "j2", "human:alice");
-  assert.throws(() => s.join(at("agent:scout", ["read", "write", "decide"]), "j3", "agent:scout"), /cannot grant decide/);
+  assert.throws(() => s.join(at("agent:scout", ["read", "write", "decide"]), "j3", "agent:scout"), /only a human can grant/);
   assert.throws(() => s.join(at("agent:x", ["root"]), "j4", "human:alice"), /unknown capability/);
   s.close();
 });

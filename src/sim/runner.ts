@@ -1,4 +1,5 @@
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type Models } from "@earendil-works/pi-ai";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Store, type PiopleEvent } from "../core/index.ts";
 import { agentTurn, fullSystem } from "../agents/loop.ts";
 import { openDurable, ensureConv } from "../agents/durable.ts";
@@ -45,6 +46,7 @@ export type Report = {
 const RIGHTS_ERROR = /^(forbidden|not-a-member|missing-actor)|tool-denied|lacks /;
 
 function worldAdapter(world: World): Adapter {
+  const done = new Map<string, { ok: boolean; output: string }>();
   return {
     check(a) {
       if (a.verb !== "set") return `world adapter supports verb "set" only, got "${String(a.verb)}"`;
@@ -52,13 +54,18 @@ function worldAdapter(world: World): Adapter {
       return world.files.has(a.path) ? null : `no such file: ${a.path}`;
     },
     describe: (a) => `world set ${String(a.path)} ${String(a.key)}=${String(a.value)}`,
-    async run(a) {
+    async run(a, { idempotencyKey }) {
+      const seen = done.get(idempotencyKey);
+      if (seen) return seen; // one key, one effect
+      let result: { ok: boolean; output: string };
       try {
         const c = world.setKey(String(a.path), String(a.key), String(a.value));
-        return { ok: true, output: `${c.path}: ${c.key} ${c.before} -> ${c.after}` };
+        result = { ok: true, output: `${c.path}: ${c.key} ${c.before} -> ${c.after}` };
       } catch (e) {
         return { ok: false, output: `FAILED: ${(e as Error).message}` };
       }
+      done.set(idempotencyKey, result);
+      return result;
     },
   };
 }
@@ -157,7 +164,9 @@ export async function runScenario(scn: Scenario, opts: RunOptions): Promise<Repo
       }
     };
 
-    for (let round = 1; round <= rounds; round++) {
+    const lim = { maxTokens: scn.limits?.maxTokens ?? Infinity, maxMs: (scn.limits?.maxSeconds ?? Infinity) * 1000, turnMs: (scn.limits?.turnSeconds ?? 300) * 1000 };
+    let stopped = false;
+    for (let round = 1; round <= rounds && !stopped; round++) {
       log(`round ${round}/${rounds}`);
       for (const h of scn.humanPosts.filter((p) => p.round === round)) {
         try {
@@ -168,6 +177,9 @@ export async function runScenario(scn: Scenario, opts: RunOptions): Promise<Repo
         }
       }
       for (const a of agents) {
+        // runaway protection: checked before every turn, so a live run can never spend past its limits
+        if (tokensIn + tokensOut >= lim.maxTokens) { errors.push(`limit-exceeded: ${tokensIn + tokensOut} tokens used (limit ${lim.maxTokens})`); stopped = true; break; }
+        if (Date.now() - started >= lim.maxMs) { errors.push(`limit-exceeded: ${scn.limits?.maxSeconds} s elapsed`); stopped = true; break; }
         if (faux) {
           const turn = scn.script![a.id]?.[round - 1] ?? {};
           faux.setResponses([
@@ -176,7 +188,15 @@ export async function runScenario(scn: Scenario, opts: RunOptions): Promise<Repo
           ]);
         }
         try {
-          const r = await agentTurn(store, { actorId: a.id, contextId: ctx, durable: { d: durable, conv: convs.get(a.id)! } });
+          const conv = convs.get(a.id)!;
+          let timer: NodeJS.Timeout | undefined;
+          const r = await Promise.race([
+            agentTurn(store, { actorId: a.id, contextId: ctx, durable: { d: durable, conv } }),
+            new Promise<never>((_res, rej) => { timer = setTimeout(() => rej(new Error(`turn-timeout: ${a.id} took longer than ${lim.turnMs / 1000} s`)), lim.turnMs); }),
+          ]).catch(async (e: unknown) => {
+            if (/^turn-timeout/.test((e as Error).message)) await (conv as unknown as { abort?: (c: unknown) => Promise<void> }).abort?.(BACKGROUND_CONTEXT).catch(() => {});
+            throw e;
+          }).finally(() => clearTimeout(timer));
           tokensIn += r.usage.prompt_tokens;
           tokensOut += r.usage.completion_tokens;
           toolCalls += r.toolCalls;

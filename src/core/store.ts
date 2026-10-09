@@ -4,6 +4,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Actor, Artifact, Context, Decision, EventType, Id, Membership, PiopleEvent } from "./types.ts";
 import { EVENT_TYPES } from "./types.ts";
+import { failpoint } from "./failpoint.ts";
 
 const MIGRATIONS: string[] = [
   `
@@ -52,6 +53,8 @@ CREATE TABLE presence (
   actor_id TEXT PRIMARY KEY, state TEXT NOT NULL, echo INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL);
 `,
+  // Migration 5: decisions may expire (a missing answer is never a "yes").
+  `ALTER TABLE decisions ADD COLUMN expires_at INTEGER;`,
 ];
 
 type EventRow = { seq: number; ts: number; type: string; context_id: string; actor_id: string; key: string; data: string };
@@ -60,9 +63,24 @@ export const CAPABILITIES = ["read", "write", "decide"] as const;
 const OBSERVATION_STATUSES = ["hypothesis", "confirmed", "refuted"];
 const PRESENCE_STATES = ["active", "away", "silent"];
 
+export type StoreOptions = {
+  /** Clock, injectable for tests of expiry. */
+  now?: () => number;
+  /** A decision cannot be decided by the actor that requested it. Default on. */
+  separationOfDuties?: boolean;
+  /** Runaway protection: asks for outside help per case per 10 minutes. Small models fan out blindly without a cap. */
+  assistancePer10Min?: number;
+};
+
 export class Store {
   readonly db: DatabaseSync;
-  constructor(path: string) {
+  private readonly now: () => number;
+  private readonly separationOfDuties: boolean;
+  private readonly assistancePer10Min: number;
+  constructor(path: string, opts: StoreOptions = {}) {
+    this.assistancePer10Min = opts.assistancePer10Min ?? 8;
+    this.now = opts.now ?? Date.now;
+    this.separationOfDuties = opts.separationOfDuties ?? true;
     mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;`);
@@ -96,6 +114,7 @@ export class Store {
     this.txDepth++;
     try {
       const r = fn();
+      if (this.txDepth === 1) failpoint("store:before-commit");
       this.txDepth--;
       this.db.exec(this.txDepth === 0 ? "COMMIT" : `RELEASE ${sp}`);
       return r;
@@ -145,16 +164,21 @@ export class Store {
     return this.tx(() => {
       const bad = m.capabilities.filter((c) => !(CAPABILITIES as readonly string[]).includes(c));
       if (bad.length) throw new Error(`bad-request: unknown capability ${bad.join(",")}`);
+      let caps = m.capabilities;
       if (grantedBy !== undefined) {
         this.mustMember(m.contextId, grantedBy, "write");
+        const kind = (this.db.prepare(`SELECT kind FROM actors WHERE id=?`).get(grantedBy) as { kind: string } | undefined)?.kind;
+        if (kind !== "human") throw new Error(`forbidden: only a human can grant access (${grantedBy} is ${kind ?? "unknown"})`);
         const held = this.capabilitiesOf(m.contextId, grantedBy);
         const over = m.capabilities.filter((c) => !held.includes(c));
         if (over.length) throw new Error(`forbidden: ${grantedBy} cannot grant ${over.join(",")} in ${m.contextId}`);
+        // Granting only adds: nobody can strip another member's rights by "joining" them again.
+        caps = [...new Set([...this.capabilitiesOf(m.contextId, m.actorId), ...m.capabilities])];
       }
       this.db.prepare(`INSERT INTO members(context_id,actor_id,capabilities,joined_at) VALUES(?,?,?,?) ON CONFLICT(context_id,actor_id) DO UPDATE SET capabilities=excluded.capabilities`).run(
-        m.contextId, m.actorId, JSON.stringify(m.capabilities), m.joinedAt,
+        m.contextId, m.actorId, JSON.stringify(caps), m.joinedAt,
       );
-      return this.append({ type: "member.joined", contextId: m.contextId, actorId: m.actorId, key, data: { capabilities: m.capabilities } });
+      return this.append({ type: "member.joined", contextId: m.contextId, actorId: m.actorId, key, data: { capabilities: caps } });
     });
   }
 
@@ -172,13 +196,30 @@ export class Store {
       this.db.prepare(`INSERT INTO artifacts(id,context_id,kind,author_id,text,status,evidence,created_at) VALUES(?,?,?,?,?,?,?,?)`).run(
         a.id, a.contextId, a.kind, a.authorId, a.text, a.status, JSON.stringify(a.evidence), a.createdAt,
       );
+      failpoint("store:observe:after-artifact");
       return this.append({ type: "observation.recorded", contextId: a.contextId, actorId: a.authorId, key: `artifact:${a.id}`, data: { artifactId: a.id, kind: a.kind, status: a.status, text: a.text.slice(0, 2000), evidence: a.evidence } });
     });
   }
 
+  /**
+   * Asking for help is bounded, counted from the log so limits survive restarts: the same ask to the same
+   * expert is refused while it is recent (wait for the answer instead), and a case gets a fixed number per 10 minutes.
+   */
   requestAssistance(contextId: Id, actorId: Id, key: string, to: Id, question: string, snapshot: Record<string, unknown>): PiopleEvent {
-    this.mustMember(contextId, actorId, "write");
-    return this.append({ type: "assistance.requested", contextId, actorId, key, data: { to, question, snapshot } });
+    return this.tx(() => {
+      this.mustMember(contextId, actorId, "write");
+      const prior = this.findEvent(contextId, key);
+      if (prior) return prior;
+      if (!question.trim()) throw new Error("bad-request: a question is needed");
+      const since = this.now() - 600_000;
+      const recent = this.db.prepare(`SELECT data FROM events WHERE context_id=? AND type='assistance.requested' AND ts>=?`).all(contextId, since) as Array<{ data: string }>;
+      const same = `${to}:${question.trim().toLowerCase().slice(0, 160)}`;
+      if (recent.some((r) => { const d = JSON.parse(r.data) as { to?: string; question?: string }; return `${d.to}:${String(d.question ?? "").trim().toLowerCase().slice(0, 160)}` === same; })) {
+        throw new Error(`conflict: ${to} was already asked the same thing recently; wait for the answer instead of repeating it`);
+      }
+      if (recent.length >= this.assistancePer10Min) throw new Error(`forbidden: asking for help is limited to ${this.assistancePer10Min} per 10 minutes in a case; summarise what is known and let a human decide`);
+      return this.append({ type: "assistance.requested", contextId, actorId, key, data: { to, question, snapshot } });
+    });
   }
 
   /**
@@ -190,7 +231,8 @@ export class Store {
     return this.tx(() => {
       const request = this.findEvent(contextId, requestKey);
       if (request?.type !== "assistance.requested") throw new Error(`unknown-request: ${requestKey} in ${contextId}`);
-      if (!this.isMember(contextId, actorId)) {
+      if (this.isMember(contextId, actorId)) this.mustMember(contextId, actorId, "write");
+      else {
         if ((request.data as { to?: string }).to !== actorId) throw new Error(`not-a-member: ${actorId} not in ${contextId}`);
         const prior = this.findEvent(contextId, key);
         if (!prior && this.hasAnswered(contextId, actorId, requestKey)) throw new Error(`forbidden: invitation ${requestKey} already used by ${actorId}`);
@@ -209,8 +251,10 @@ export class Store {
       this.mustMember(d.contextId, d.requestedBy, "write");
       const prior = this.findEvent(d.contextId, `decision:${d.id}`);
       if (prior) return prior;
-      this.db.prepare(`INSERT INTO decisions(id,context_id,question,options,requested_by,decided_by,answer,status,created_at,resolved_at) VALUES(?,?,?,?,?,NULL,NULL,'open',?,NULL)`).run(
-        d.id, d.contextId, d.question, JSON.stringify(d.options), d.requestedBy, d.createdAt,
+      if (!d.question.trim()) throw new Error("bad-request: a decision needs a question");
+      if (d.options.length < 2 || new Set(d.options).size !== d.options.length) throw new Error("bad-request: a decision needs at least two distinct options");
+      this.db.prepare(`INSERT INTO decisions(id,context_id,question,options,requested_by,decided_by,answer,status,created_at,resolved_at,expires_at) VALUES(?,?,?,?,?,NULL,NULL,'open',?,NULL,?)`).run(
+        d.id, d.contextId, d.question, JSON.stringify(d.options), d.requestedBy, d.createdAt, d.expiresAt ?? null,
       );
       return this.append({ type: "decision.requested", contextId: d.contextId, actorId: d.requestedBy, key: `decision:${d.id}`, data: { decisionId: d.id, question: d.question } });
     });
@@ -237,6 +281,29 @@ export class Store {
     return this.db.prepare(`SELECT status, answer FROM decisions WHERE id=? AND context_id=?`).get(decisionId, contextId) as { status: string; answer: string | null } | undefined;
   }
 
+  /**
+   * Who may take this decision, and why not. Order matters so answers never mislead: membership and the decide
+   * capability first, then whether it is still open (a finished decision is "conflict" for everyone who may act),
+   * then the person: a human, not the requester (separation of duties), and present: an away human, with or without
+   * an echo delegate, cannot decide. The answer must be one of the options, checked last.
+   */
+  canDecide(contextId: Id, decisionId: Id, actorId: Id): { ok: true } | { ok: false; reason: string } {
+    const d = this.db.prepare(`SELECT status, requested_by, expires_at, options FROM decisions WHERE id=? AND context_id=?`).get(decisionId, contextId) as
+      { status: string; requested_by: string; expires_at: number | null; options: string } | undefined;
+    if (!d) return { ok: false, reason: `unknown-decision: ${decisionId} in ${contextId}` };
+    if (!this.isMember(contextId, actorId)) return { ok: false, reason: `not-a-member: ${actorId} not in ${contextId}` };
+    if (!this.capabilitiesOf(contextId, actorId).includes("decide")) return { ok: false, reason: `forbidden: ${actorId} lacks decide in ${contextId}` };
+    if (d.status !== "open") return { ok: false, reason: `decision-not-open: ${decisionId} is ${d.status}` };
+    if (d.expires_at !== null && d.expires_at <= this.now()) return { ok: false, reason: `decision-expired: ${decisionId}` };
+    const kind = (this.db.prepare(`SELECT kind FROM actors WHERE id=?`).get(actorId) as { kind: string } | undefined)?.kind;
+    if (kind !== "human") return { ok: false, reason: "forbidden: only a human can decide" };
+    if (this.separationOfDuties && d.requested_by === actorId) return { ok: false, reason: "forbidden: requester cannot decide their own request" };
+    const pres = this.db.prepare(`SELECT state, echo FROM presence WHERE actor_id=?`).get(actorId) as { state: string; echo: number } | undefined;
+    if (pres?.echo) return { ok: false, reason: "forbidden: echo delegate may never decide" };
+    if (pres && pres.state !== "active") return { ok: false, reason: `forbidden: presence is ${pres.state}` };
+    return { ok: true };
+  }
+
   startRun(id: string, caseId: string, model: string, rounds: number): void {
     this.db.prepare(`INSERT INTO runs(id,case_id,model,started_at,rounds) VALUES(?,?,?,?,?)`).run(id, caseId, model, Date.now(), rounds);
   }
@@ -256,16 +323,47 @@ export class Store {
   }
 
   resolveDecision(contextId: Id, actorId: Id, key: string, decisionId: Id, answer: string): PiopleEvent {
-    return this.tx(() => {
+    // Expiry must commit even though the caller is refused, so refusals travel as values out of the transaction.
+    const out = this.tx((): { ev: PiopleEvent } | { error: string } => {
       this.mustMember(contextId, actorId, "decide");
       const prior = this.findEvent(contextId, key);
-      if (prior) return prior;
-      const pres = this.db.prepare(`SELECT echo FROM presence WHERE actor_id=?`).get(actorId) as { echo: number } | undefined;
-      if (pres?.echo) throw new Error(`forbidden: echo delegate may never decide`);
-      const info = this.db.prepare(`UPDATE decisions SET status='resolved', decided_by=?, answer=?, resolved_at=? WHERE id=? AND context_id=? AND status='open'`).run(actorId, answer, Date.now(), decisionId, contextId);
-      if (info.changes !== 1) throw new Error(`decision-not-open: ${decisionId}`);
-      return this.append({ type: "decision.resolved", contextId, actorId, key, data: { decisionId, answer } });
+      if (prior) return { ev: prior };
+      const verdict = this.canDecide(contextId, decisionId, actorId);
+      if (!verdict.ok) {
+        if (verdict.reason.startsWith("decision-expired")) this.expire(contextId, decisionId);
+        return { error: verdict.reason };
+      }
+      const options = JSON.parse((this.db.prepare(`SELECT options FROM decisions WHERE id=?`).get(decisionId) as { options: string }).options) as string[];
+      if (!options.includes(answer)) return { error: `bad-request: answer must be one of: ${options.join(", ")}` };
+      const info = this.db.prepare(`UPDATE decisions SET status='resolved', decided_by=?, answer=?, resolved_at=? WHERE id=? AND context_id=? AND status='open'`).run(actorId, answer, this.now(), decisionId, contextId);
+      if (info.changes !== 1) return { error: `decision-not-open: ${decisionId}` };
+      return { ev: this.append({ type: "decision.resolved", contextId, actorId, key, data: { decisionId, answer } }) };
     });
+    if ("error" in out) throw new Error(out.error);
+    return out.ev;
+  }
+
+  /** What needs this person now: open decisions they may take right now, across every case they sit in. */
+  needsYou(actorId: Id): Array<{ contextId: string; decisionId: string; question: string; requestedBy: string; expiresAt: number | null }> {
+    const rows = this.db.prepare(
+      `SELECT d.id, d.context_id, d.question, d.requested_by, d.expires_at FROM decisions d
+       JOIN members m ON m.context_id=d.context_id AND m.actor_id=? WHERE d.status='open' ORDER BY d.created_at, d.rowid`,
+    ).all(actorId) as Array<{ id: string; context_id: string; question: string; requested_by: string; expires_at: number | null }>;
+    return rows
+      .filter((r) => this.canDecide(r.context_id, r.id, actorId).ok)
+      .map((r) => ({ contextId: r.context_id, decisionId: r.id, question: r.question, requestedBy: r.requested_by, expiresAt: r.expires_at }));
+  }
+
+  /** Close every open decision whose deadline has passed. Call from a timer; the store never runs one itself. */
+  expireDue(): number {
+    const due = this.db.prepare(`SELECT id, context_id FROM decisions WHERE status='open' AND expires_at IS NOT NULL AND expires_at<=?`).all(this.now()) as Array<{ id: string; context_id: string }>;
+    for (const d of due) this.tx(() => this.expire(d.context_id, d.id));
+    return due.length;
+  }
+
+  private expire(contextId: Id, decisionId: Id): void {
+    const info = this.db.prepare(`UPDATE decisions SET status='expired', resolved_at=? WHERE id=? AND context_id=? AND status='open'`).run(this.now(), decisionId, contextId);
+    if (info.changes === 1) this.append({ type: "decision.expired", contextId, actorId: "system", key: `expired:${decisionId}`, data: { decisionId } });
   }
 
   setPresence(actorId: Id, state: "active" | "away" | "silent", echo: boolean): PiopleEvent | null {
@@ -299,7 +397,7 @@ export class Store {
     if (!EVENT_TYPES.includes(e.type)) throw new Error(`unknown-event: ${e.type}`);
     const existing = this.findEvent(e.contextId, e.key);
     if (existing) return existing;
-    const info = this.db.prepare(`INSERT INTO events(ts,type,context_id,actor_id,key,data) VALUES(?,?,?,?,?,?)`).run(Date.now(), e.type, e.contextId, e.actorId, e.key, JSON.stringify(e.data));
+    const info = this.db.prepare(`INSERT INTO events(ts,type,context_id,actor_id,key,data) VALUES(?,?,?,?,?,?)`).run(this.now(), e.type, e.contextId, e.actorId, e.key, JSON.stringify(e.data));
     const row = this.db.prepare(`SELECT seq, ts, type, context_id, actor_id, key, data FROM events WHERE seq=?`).get(info.lastInsertRowid) as EventRow;
     return this.row(row);
   }
