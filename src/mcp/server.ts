@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Store } from "../core/index.ts";
 
 /**
@@ -13,7 +14,7 @@ const ACTOR = process.env.PIO_MCP_ACTOR ?? "agent:ext";
 const DATA = process.env.PIO_DATA ?? "./data/piople.sqlite";
 const store = new Store(DATA);
 
-type Req = { jsonrpc: string; id: number | string | null; method: string; params?: { name?: string; arguments?: Record<string, unknown> } };
+type Req = { jsonrpc: string; id?: number | string | null; method: string; params?: { name?: string; arguments?: Record<string, unknown> } };
 
 const TOOLS = [
   { name: "piople_events", description: "Read context events after seq", inputSchema: { type: "object", properties: { context: { type: "string" }, after: { type: "number" } }, required: ["context"] } },
@@ -22,10 +23,10 @@ const TOOLS = [
   { name: "piople_answer", description: "Answer an assistance request (member or invited)", inputSchema: { type: "object", properties: { context: { type: "string" }, key: { type: "string" }, requestKey: { type: "string" }, answer: { type: "string" } }, required: ["context", "requestKey", "answer"] } },
 ];
 
-function ok(id: Req["id"], result: unknown) {
+function ok(id: Req["id"] | undefined, result: unknown) {
   process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");
 }
-function err(id: Req["id"], code: number, message: string) {
+function err(id: Req["id"] | undefined, code: number, message: string) {
   process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, error: { code, message: String(message).slice(0, 300) } }) + "\n");
 }
 
@@ -42,6 +43,8 @@ process.stdin.on("data", (d: Buffer) => {
     } catch {
       continue;
     }
+    // JSON-RPC notifications carry no id and must never be answered.
+    if (req.id === undefined || req.id === null) continue;
     try {
       if (req.method === "initialize") {
         ok(req.id, { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "piople", version: "0.0.1" } });
@@ -54,19 +57,19 @@ process.stdin.on("data", (d: Buffer) => {
           if (!store.isMember(String(a.context), ACTOR)) throw new Error("not-a-member");
           ok(req.id, { content: [{ type: "text", text: JSON.stringify(store.eventsSince(String(a.context), Number(a.after ?? 0))) }] });
         } else if (name === "piople_post") {
-          const ev = store.postMessage(String(a.context), ACTOR, String(a.key ?? `mcp:${Date.now()}`), String(a.text));
+          const ev = store.postMessage(String(a.context), ACTOR, String(a.key ?? `mcp:${randomUUID()}`), String(a.text));
           ok(req.id, { content: [{ type: "text", text: JSON.stringify(ev) }] });
         } else if (name === "piople_observe") {
-          const ev = store.recordObservation({ id: `mcp:${Date.now()}`, contextId: String(a.context), kind: "finding", authorId: ACTOR, text: String(a.text), status: "hypothesis", evidence: (a.evidence as string[]) ?? [], createdAt: Date.now() });
+          const ev = store.recordObservation({ id: `mcp:${randomUUID()}`, contextId: String(a.context), kind: "finding", authorId: ACTOR, text: String(a.text), status: "hypothesis", evidence: (a.evidence as string[]) ?? [], createdAt: Date.now() });
           ok(req.id, { content: [{ type: "text", text: JSON.stringify(ev) }] });
         } else if (name === "piople_answer") {
-          const ev = store.answerAssistance(String(a.context), ACTOR, String(a.key ?? `mcp:${Date.now()}`), String(a.requestKey), String(a.answer), []);
+          const ev = store.answerAssistance(String(a.context), ACTOR, String(a.key ?? `mcp:${randomUUID()}`), String(a.requestKey), String(a.answer), []);
           ok(req.id, { content: [{ type: "text", text: JSON.stringify(ev) }] });
         } else {
           err(req.id, -32602, `unknown tool: ${name}`);
         }
-      } else if (req.method === "notifications/initialized") {
-        // no-op
+      } else if (req.method === "ping") {
+        ok(req.id, {});
       } else {
         err(req.id, -32601, `unknown method: ${req.method}`);
       }

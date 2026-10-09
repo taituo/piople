@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 /**
  * V2 read-only tools. Allowlist, not blocklist: only kubectl read verbs in
@@ -18,20 +19,25 @@ export function describeTools(): string {
 {"tool":"repo","op":"ls|read","path":"src/...","lines?":number}`;
 }
 
-const REPO_ROOTS = ["/home/tiny/projects/piople/src", "/home/tiny/projects/piople/test", "/home/tiny/projects/piople/scripts"];
+/** Checkout root, derived from this file so the tool works wherever the repo lives. */
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const REPO_ROOTS = ["src", "test", "scripts"].map((d) => path.join(REPO, d));
 
 function repoRead(op: string, rel: string, lines: number): ToolResult {
-  const abs = path.resolve("/home/tiny/projects/piople", rel);
-  if (!REPO_ROOTS.some((r) => abs === r || abs.startsWith(r + "/"))) return { ok: false, output: `forbidden path: ${rel}` };
+  const abs = path.resolve(REPO, rel);
+  if (!REPO_ROOTS.some((r) => abs === r || abs.startsWith(r + path.sep))) return { ok: false, output: `forbidden path: ${rel}` };
   try {
-    const st = fs.statSync(abs);
+    // Resolve symlinks before trusting the prefix check.
+    const real = fs.realpathSync(abs);
+    if (!REPO_ROOTS.some((r) => real === r || real.startsWith(r + path.sep))) return { ok: false, output: `forbidden path: ${rel}` };
+    const st = fs.statSync(real);
     if (op === "ls") {
       if (!st.isDirectory()) return { ok: false, output: "not a directory" };
-      return { ok: true, output: fs.readdirSync(abs).join("\n").slice(0, 2000) };
+      return { ok: true, output: fs.readdirSync(real).join("\n").slice(0, 2000) };
     }
     if (op === "read") {
       if (!st.isFile()) return { ok: false, output: "not a file" };
-      const text = fs.readFileSync(abs, "utf8").split("\n").slice(0, Math.min(lines || 120, 200)).join("\n");
+      const text = fs.readFileSync(real, "utf8").split("\n").slice(0, Math.min(lines || 120, 200)).join("\n");
       return { ok: true, output: text.slice(0, 4000) };
     }
     return { ok: false, output: `unknown repo op: ${op}` };

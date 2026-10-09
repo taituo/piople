@@ -45,3 +45,20 @@ test("dev mode: body actorId still works (backwards compatible)", async () => {
     srv.kill();
   }
 });
+
+test("join: strangers cannot add themselves, members cannot grant what they lack", async () => {
+  const srv = await start({}, 18993);
+  try {
+    const ctx = (await post(18993, "/api/v1/contexts", { title: "t" }, "human:alice")).json as { id: string };
+    const self = await post(18993, "/api/v1/join", { context: ctx.id, capabilities: ["read", "write", "decide"] }, "agent:evil");
+    assert.equal(self.code, 403);
+    const add = await post(18993, "/api/v1/join", { context: ctx.id, member: "agent:scout", capabilities: ["read", "write"] }, "human:alice");
+    assert.equal(add.code, 200);
+    const up = await post(18993, "/api/v1/join", { context: ctx.id, capabilities: ["read", "write", "decide"] }, "agent:scout");
+    assert.equal(up.code, 403);
+    const junk = await post(18993, "/api/v1/join", { context: ctx.id, member: "agent:x", capabilities: "all" }, "human:alice");
+    assert.equal(junk.code, 400);
+  } finally {
+    srv.kill();
+  }
+});

@@ -19,7 +19,9 @@ scripts/     run-case.ts — unified runner, see --help-ish args in file
 data/        live DBs; data/archive/ — frozen V1–V3 runs, keep readable, don't write
 ```
 
-Needs Node >= 22.19 (`/opt/opencode-go-node/bin` on this host).
+Needs Node >= 22.19 (`/opt/opencode-go-node/bin` on this host). CI runs `typecheck` + `test`;
+the live-cluster test skips itself when no `demo-apps` cluster is reachable.
+Gateway bearer: `PIO_GATEWAY_BEARER`, or the file in `PIO_BEARER_FILE`.
 
 ```sh
 npm install
@@ -121,3 +123,20 @@ every refusal. Identity header `x-piople-actor` is trusted dev-only
   Identity from env `PIO_MCP_ACTOR` (no spoof arg); non-member reads rejected.
   Live-smoked incl. the stranger case. Slack/Teams need credentials we don't
   have — left out deliberately.
+## Hardening pass (2026-10-09)
+
+No new core concepts; reliability limits only.
+
+- **Atomic mutations**: state change + its event commit in one transaction
+  (`Store.tx`, savepoints nest); migrations commit with their version bump.
+- **Replays everywhere**: observation/decision/proposal/resolve with a seen key return
+  the original event instead of a constraint error.
+- **No privilege escalation via join**: HTTP `join` needs a member caller, who can only
+  grant capabilities it holds; unknown capabilities rejected.
+- **Expert invitations are single-use and request-bound**: an answer must reference a
+  real `assistance.requested`; an invited non-member answers only that request, once.
+- **Executor trusts the log, not the caller**: runs the stored `action.proposed`, only
+  for its bound decision, once after success; refusals/failures never shadow a retry.
+- Repo tool roots derive from the checkout (symlinks resolved); HTTP body capped at 1 MiB,
+  inputs validated, SSE/`/events` follow the auth mode; MCP ignores notifications.
+- Still open: `loop.ts` text protocol (`TOOLCALL`/`PROPOSE`) should move to Pi-native tools.
