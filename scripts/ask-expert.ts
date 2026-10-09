@@ -1,6 +1,6 @@
 import { Store } from "../src/core/index.ts";
 import { readBearer, fullSystem } from "../src/agents/loop.ts";
-import { createGateway } from "../src/agents/pi-provider.ts";
+import { createGateway, gatewayUrl } from "../src/agents/pi-provider.ts";
 import { openDurable, ensureConv, askConv } from "../src/agents/durable.ts";
 
 /**
@@ -24,7 +24,7 @@ const BY = arg("by", "agent:scout");
 const TO = arg("to", "case-b");
 const EXPERT = arg("expert", "agent:reviewer");
 const Q = arg("q", "question?");
-const BASE = process.env.PIO_GATEWAY ?? "http://10.91.1.1:8788/v1";
+const BASE = gatewayUrl();
 const MODEL = process.env.PIO_MODEL ?? "deepseek-v4-flash";
 
 const s = new Store(DATA);

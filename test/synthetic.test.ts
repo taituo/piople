@@ -23,7 +23,7 @@ test("four actors, one case, full loop with idempotent replay", () => {
   assert.equal(m1.seq, m1b.seq);
 
   s.recordObservation({ id: "obs-1", contextId: "case-1", kind: "finding", authorId: "agent:scout", text: "POOL_SIZE=0 in ConfigMap", status: "hypothesis", evidence: ["k8s:configmap/checkout"], createdAt: Date.now() });
-  const req = s.requestAssistance("case-1", "agent:scout", "ask-1", "agent:builder", "Is this enough to crash on restart?", { observation: "obs-1" });
+  s.requestAssistance("case-1", "agent:scout", "ask-1", "agent:builder", "Is this enough to crash on restart?", { observation: "obs-1" });
   s.answerAssistance("case-1", "agent:builder", "ans-1", "ask-1", "No — also check pool init retry", ["git:src/pool.ts"]);
   s.requestDecision({ id: "d-1", contextId: "case-1", question: "Apply fix to staging?", options: ["yes", "no"], requestedBy: "agent:builder", decidedBy: null, answer: null, status: "open", createdAt: Date.now(), resolvedAt: null });
   // agent cannot decide: needs decide capability

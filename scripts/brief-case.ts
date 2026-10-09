@@ -1,6 +1,6 @@
 import { Store } from "../src/core/index.ts";
 import { readBearer } from "../src/agents/loop.ts";
-import { createGateway, textOf } from "../src/agents/pi-provider.ts";
+import { createGateway, gatewayUrl, textOf } from "../src/agents/pi-provider.ts";
 
 /**
  * F: case brief. Compacts a context's events into one structured artifact
@@ -19,7 +19,7 @@ const DATA = arg("db", "./data/x.sqlite");
 const CTX = arg("case", "case-1");
 const BY = arg("by", "human:alice");
 const MODEL = process.env.PIO_MODEL ?? "deepseek-v4-flash";
-const BASE = process.env.PIO_GATEWAY ?? "http://10.91.1.1:8788/v1";
+const BASE = gatewayUrl();
 
 const s = new Store(DATA);
 const goal = (s.db.prepare(`SELECT goal FROM contexts WHERE id=?`).get(CTX) as { goal: string } | undefined)?.goal ?? "";
@@ -31,6 +31,7 @@ const lines = events.map((e) => {
 
 const { models } = createGateway(BASE, readBearer(), [MODEL]);
 const model = models.getModel("piople", MODEL);
+if (!model) throw new Error(`model not registered: ${MODEL}`);
 const msg = await models.completeSimple(model, {
   systemPrompt: "Write a case brief in Finnish, max 200 words, sections: TAVOITE / VAHVISTETTU / AVOINNA / PÄÄTÖKSET. Only what the log supports; mark guesses as guesses.",
   messages: [{ role: "user", content: `Goal: ${goal}\n\nLog:\n${lines.join("\n")}` }],

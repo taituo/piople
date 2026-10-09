@@ -5,6 +5,9 @@ import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completio
  * B1: Pi owns model transport. One "piople" provider in front of the
  * OpenAI-compatible gateway (same one Entropi uses). No fetch() in the loop.
  */
+/** OpenAI-compatible gateway. Override with PIO_GATEWAY, e.g. https://opencode.ai/zen/go/v1 together with OPENCODE_API_KEY. */
+export const gatewayUrl = (): string => process.env.PIO_GATEWAY ?? "http://10.91.1.1:8788/v1";
+
 export type Gateway = { models: Models; providerId: string };
 
 export function createGateway(baseUrl: string, bearer: string, modelIds: string[]): Gateway {

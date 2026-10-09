@@ -2,7 +2,6 @@ import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { Conversation } from "@earendil-works/pi-durable";
 import { Store } from "../core/index.ts";
-import { describeTools } from "./tools.ts";
 import { askConv, type Durable } from "./durable.ts";
 import { sanitize } from "./sanitize.ts";
 
@@ -21,14 +20,14 @@ export type AgentConfig = {
   durable: { d: Durable; conv: Conversation };
 };
 
-/** Gateway bearer: PIO_GATEWAY_BEARER, else the file named by PIO_BEARER_FILE (default: host gateway config). */
+/** Gateway bearer: PIO_GATEWAY_BEARER, else OPENCODE_API_KEY, else the file named by PIO_BEARER_FILE (default: host gateway config). */
 export function readBearer(path = process.env.PIO_BEARER_FILE ?? `${process.env.HOME ?? ""}/.config/opencode-go-gateway/gateway-bearer`): string {
-  const fromEnv = process.env.PIO_GATEWAY_BEARER?.trim();
+  const fromEnv = (process.env.PIO_GATEWAY_BEARER ?? process.env.OPENCODE_API_KEY)?.trim();
   if (fromEnv) return fromEnv;
   try {
     return fs.readFileSync(path, "utf8").trim();
   } catch {
-    throw new Error(`gateway bearer not found: set PIO_GATEWAY_BEARER or PIO_BEARER_FILE (tried ${path})`);
+    throw new Error(`gateway bearer not found: set PIO_GATEWAY_BEARER, OPENCODE_API_KEY or PIO_BEARER_FILE (tried ${path})`);
   }
 }
 
@@ -47,9 +46,20 @@ export function contextPrompt(s: Store, contextId: string, goal: string, lastN =
   return `Goal: ${goal}\n\n${digest}Shared history (newest last):\n${lines.join("\n")}`;
 }
 
-/** Durable conversations need the FULL system text at creation: bare role prompts drift into meta-chat. */
-export function fullSystem(base: string): string {
-  return `${base}\n\nReply in Finnish. Keep it under 120 words.\n${describeTools()}\nNever invent log/config content: fetch it with a tool first.\nRecord evidence-backed findings with the observe tool. To change anything use the propose tool: do NOT describe a kubectl command. A human must approve before anything runs.`;
+export type SystemOptions = { language?: string; maxWords?: number; tools?: readonly string[] };
+
+/**
+ * Durable conversations need the FULL system text at creation: bare role prompts drift into
+ * meta-chat with zero tool use. Rules follow the tools the agent actually holds; nothing here
+ * names a domain.
+ */
+export function fullSystem(base: string, o: SystemOptions = {}): string {
+  const tools = o.tools ?? ["observe", "propose"];
+  const rules = [`Reply in ${o.language ?? "English"}. Keep it under ${o.maxWords ?? 120} words.`];
+  if (tools.some((t) => t !== "observe" && t !== "propose")) rules.push("Never invent facts about the world: fetch them with a tool first.");
+  if (tools.includes("observe")) rules.push("Record evidence-backed findings with the observe tool, citing what you fetched and where.");
+  if (tools.includes("propose")) rules.push("To change anything use the propose tool, never describe a command. A human with decision rights must approve before anything runs.");
+  return `${base}\n\n${rules.join("\n")}`;
 }
 
 export async function agentTurn(

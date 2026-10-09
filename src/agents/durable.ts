@@ -4,7 +4,7 @@ import type { Models } from "@earendil-works/pi-ai";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { Store } from "../core/index.ts";
 import { sanitize } from "./sanitize.ts";
-import { pioupleExtension } from "./pi-tools.ts";
+import { pioupleExtension, type PiopleToolOptions } from "./pi-tools.ts";
 
 /**
  * H1: one durable Pi conversation per (context, actor).
@@ -20,10 +20,10 @@ export type Durable = {
 };
 
 /** Opens Pi's storage and installs the piople tool extension bound to `store`. */
-export async function openDurable(piDbPath: string, models: Models, store: Store): Promise<Durable> {
+export async function openDurable(piDbPath: string, models: Models, store: Store, tools: PiopleToolOptions = {}): Promise<Durable> {
   const storage = await openNodeSqliteStorage(piDbPath);
   const registry = createRegistry();
-  registry.install(pioupleExtension(store));
+  registry.install(pioupleExtension(store, tools));
   const harness = await Harness.open(storage, {
     models,
     registry,

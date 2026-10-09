@@ -217,7 +217,7 @@ export class Store {
   }
 
   /** Agent proposes a side-effecting action. Never executes: binds to a decision. */
-  proposeAction(a: Artifact, action: { verb: string; res: string; ns: string; name?: string; patch?: unknown }, decisionId: Id): PiopleEvent {
+  proposeAction(a: Artifact, action: Record<string, unknown>, decisionId: Id): PiopleEvent {
     return this.tx(() => {
       this.mustMember(a.contextId, a.authorId, "write");
       const prior = this.findEvent(a.contextId, `proposal:${a.id}`);

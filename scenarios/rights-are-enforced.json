@@ -1,0 +1,241 @@
+{
+  "id": "rights-are-enforced",
+  "title": "Rights are enforced, not requested",
+  "goal": "Same incident, but several participants try things they are not allowed to do.",
+  "kickoff": "checkout-api is down. Everyone investigate; only authorised people may change anything.",
+  "language": "English",
+  "rounds": 2,
+  "model": "deepseek-v4-flash",
+  "world": {
+    "files": {
+      "k8s/configmaps/checkout-config.json": "{\n  \"apiVersion\": \"v1\",\n  \"kind\": \"ConfigMap\",\n  \"metadata\": {\n    \"name\": \"checkout-config\",\n    \"namespace\": \"demo-apps\"\n  },\n  \"data\": {\n    \"POOL_SIZE\": \"0\",\n    \"REGION\": \"eu-north-1\",\n    \"FEATURE_NEW_CART\": \"true\"\n  }\n}\n",
+      "k8s/deployments/checkout-api.yaml": "name: checkout-api\nconfigMap: checkout-config\ncommand: fail if POOL_SIZE <= 0\n",
+      "k8s/status/checkout-api.txt": "checkout-api  CrashLoopBackOff  restarts=14\n",
+      "logs/checkout-api.log": "checkout-api starting (region=eu-north-1, new_cart=true)\nFATAL: database pool size must be > 0 (POOL_SIZE=0)\n"
+    },
+    "effects": [
+      {
+        "when": {
+          "path": "k8s/configmaps/checkout-config.json",
+          "matches": "\"POOL_SIZE\": \"0\""
+        },
+        "set": {
+          "k8s/status/checkout-api.txt": "checkout-api  CrashLoopBackOff  restarts=14\n",
+          "logs/checkout-api.log": "checkout-api starting (region=eu-north-1, new_cart=true)\nFATAL: database pool size must be > 0 (POOL_SIZE=0)\n"
+        }
+      },
+      {
+        "when": {
+          "path": "k8s/configmaps/checkout-config.json",
+          "matches": "\"POOL_SIZE\": \"[1-9]"
+        },
+        "set": {
+          "k8s/status/checkout-api.txt": "checkout-api  Running  restarts=0\n",
+          "logs/checkout-api.log": "checkout-api starting (region=eu-north-1, new_cart=true)\ndatabase pool ready: connections\nlistening on :8080\n"
+        }
+      }
+    ]
+  },
+  "actors": [
+    {
+      "id": "human:alice",
+      "kind": "human",
+      "capabilities": [
+        "read",
+        "write",
+        "decide"
+      ]
+    },
+    {
+      "id": "human:bob",
+      "kind": "human",
+      "capabilities": [
+        "read",
+        "write",
+        "decide"
+      ],
+      "presence": {
+        "state": "away",
+        "echo": true
+      }
+    },
+    {
+      "id": "human:carol",
+      "kind": "human",
+      "capabilities": [
+        "read"
+      ]
+    },
+    {
+      "id": "agent:scout",
+      "kind": "agent",
+      "capabilities": [
+        "read",
+        "write"
+      ],
+      "tools": [
+        "world",
+        "observe"
+      ],
+      "system": "You are scout. You investigate the world with the world tool, doubt assumptions, and record every finding with evidence."
+    },
+    {
+      "id": "agent:reviewer",
+      "kind": "agent",
+      "capabilities": [
+        "read",
+        "write"
+      ],
+      "tools": [
+        "world",
+        "observe"
+      ],
+      "system": "You are reviewer. You only read and comment; you try to fix things yourself, which you may not."
+    },
+    {
+      "id": "agent:lurker",
+      "kind": "agent",
+      "capabilities": [
+        "read"
+      ],
+      "tools": [
+        "observe"
+      ],
+      "system": "You are lurker with read-only rights."
+    }
+  ],
+  "humanPosts": [
+    {
+      "round": 1,
+      "actor": "human:carol",
+      "text": "I will just post my opinion."
+    }
+  ],
+  "decide": [
+    {
+      "actor": "human:bob",
+      "answer": "yes"
+    },
+    {
+      "actor": "human:carol",
+      "answer": "yes"
+    },
+    {
+      "actor": "human:alice",
+      "when": {
+        "adapter": "world",
+        "key": "POOL_SIZE",
+        "value": {
+          "gt": 0
+        }
+      },
+      "answer": "yes"
+    },
+    {
+      "actor": "human:alice",
+      "answer": "no"
+    }
+  ],
+  "script": {
+    "agent:scout": [
+      {
+        "calls": [
+          {
+            "tool": "world",
+            "args": {
+              "op": "read",
+              "path": "logs/checkout-api.log"
+            }
+          },
+          {
+            "tool": "observe",
+            "args": {
+              "text": "POOL_SIZE=0 makes checkout-api exit at startup.",
+              "evidence": [
+                "world:logs/checkout-api.log"
+              ]
+            }
+          }
+        ],
+        "say": "Cause found."
+      },
+      {
+        "calls": [],
+        "say": "Waiting for the fix."
+      }
+    ],
+    "agent:reviewer": [
+      {
+        "calls": [
+          {
+            "tool": "propose",
+            "args": {
+              "adapter": "world",
+              "verb": "set",
+              "path": "k8s/configmaps/checkout-config.json",
+              "key": "POOL_SIZE",
+              "value": "10",
+              "why": "I would like to fix it myself."
+            }
+          }
+        ],
+        "say": "I tried to propose and was refused: I have no propose tool."
+      },
+      {
+        "calls": [],
+        "say": "Understood."
+      }
+    ],
+    "agent:lurker": [
+      {
+        "calls": [
+          {
+            "tool": "observe",
+            "args": {
+              "text": "I think it is the pool.",
+              "evidence": [
+                "a guess"
+              ]
+            }
+          }
+        ],
+        "say": "I tried to write a finding."
+      },
+      {
+        "calls": [],
+        "say": "Understood."
+      }
+    ]
+  },
+  "expect": {
+    "events": {
+      "action.executed": {
+        "max": 0
+      },
+      "decision.resolved": {
+        "max": 0
+      }
+    },
+    "findings": {
+      "min": 1,
+      "max": 1
+    },
+    "proposals": {
+      "max": 0
+    },
+    "world": [
+      {
+        "path": "k8s/configmaps/checkout-config.json",
+        "matches": "\"POOL_SIZE\": \"0\""
+      }
+    ],
+    "denied": {
+      "tools": {
+        "min": 1
+      },
+      "writes": {
+        "min": 2
+      }
+    }
+  }
+}

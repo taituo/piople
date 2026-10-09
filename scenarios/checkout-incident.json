@@ -1,0 +1,257 @@
+{
+  "id": "checkout-incident",
+  "title": "checkout-api crashes after restart",
+  "goal": "Find out why checkout-api crash-loops after restart, propose a fix, and verify it. Do not invent log data.",
+  "kickoff": "Please help: checkout-api crashes every time it restarts. Find the cause and propose a fix.",
+  "language": "English",
+  "rounds": 2,
+  "model": "deepseek-v4-flash",
+  "world": {
+    "files": {
+      "k8s/configmaps/checkout-config.json": "{\n  \"apiVersion\": \"v1\",\n  \"kind\": \"ConfigMap\",\n  \"metadata\": {\n    \"name\": \"checkout-config\",\n    \"namespace\": \"demo-apps\"\n  },\n  \"data\": {\n    \"POOL_SIZE\": \"0\",\n    \"REGION\": \"eu-north-1\",\n    \"FEATURE_NEW_CART\": \"true\"\n  }\n}\n",
+      "k8s/deployments/checkout-api.yaml": "name: checkout-api\nconfigMap: checkout-config\ncommand: fail if POOL_SIZE <= 0\n",
+      "k8s/status/checkout-api.txt": "checkout-api  CrashLoopBackOff  restarts=14\n",
+      "logs/checkout-api.log": "checkout-api starting (region=eu-north-1, new_cart=true)\nFATAL: database pool size must be > 0 (POOL_SIZE=0)\n"
+    },
+    "effects": [
+      {
+        "when": {
+          "path": "k8s/configmaps/checkout-config.json",
+          "matches": "\"POOL_SIZE\": \"0\""
+        },
+        "set": {
+          "k8s/status/checkout-api.txt": "checkout-api  CrashLoopBackOff  restarts=14\n",
+          "logs/checkout-api.log": "checkout-api starting (region=eu-north-1, new_cart=true)\nFATAL: database pool size must be > 0 (POOL_SIZE=0)\n"
+        }
+      },
+      {
+        "when": {
+          "path": "k8s/configmaps/checkout-config.json",
+          "matches": "\"POOL_SIZE\": \"[1-9]"
+        },
+        "set": {
+          "k8s/status/checkout-api.txt": "checkout-api  Running  restarts=0\n",
+          "logs/checkout-api.log": "checkout-api starting (region=eu-north-1, new_cart=true)\ndatabase pool ready: connections\nlistening on :8080\n"
+        }
+      }
+    ]
+  },
+  "actors": [
+    {
+      "id": "human:alice",
+      "kind": "human",
+      "capabilities": [
+        "read",
+        "write",
+        "decide"
+      ]
+    },
+    {
+      "id": "agent:scout",
+      "kind": "agent",
+      "capabilities": [
+        "read",
+        "write"
+      ],
+      "tools": [
+        "world",
+        "observe"
+      ],
+      "system": "You are scout. You investigate the world with the world tool, doubt assumptions, and record every finding with evidence."
+    },
+    {
+      "id": "agent:builder",
+      "kind": "agent",
+      "capabilities": [
+        "read",
+        "write"
+      ],
+      "tools": [
+        "world",
+        "observe",
+        "propose"
+      ],
+      "system": "You are builder. You propose one concrete, minimal fix with the propose tool (adapter=world, verb=set, path, key, value) and say how it will be verified."
+    }
+  ],
+  "humanPosts": [
+    {
+      "round": 2,
+      "actor": "human:alice",
+      "text": "Thanks. Apply the fix only if you can show it is safe, then verify the logs."
+    }
+  ],
+  "decide": [
+    {
+      "actor": "human:alice",
+      "when": {
+        "adapter": "world",
+        "key": "POOL_SIZE",
+        "value": {
+          "gt": 0
+        }
+      },
+      "answer": "yes"
+    },
+    {
+      "actor": "human:alice",
+      "answer": "no"
+    }
+  ],
+  "script": {
+    "agent:scout": [
+      {
+        "calls": [
+          {
+            "tool": "world",
+            "args": {
+              "op": "ls"
+            }
+          },
+          {
+            "tool": "world",
+            "args": {
+              "op": "read",
+              "path": "logs/checkout-api.log"
+            }
+          },
+          {
+            "tool": "world",
+            "args": {
+              "op": "read",
+              "path": "k8s/configmaps/checkout-config.json"
+            }
+          },
+          {
+            "tool": "observe",
+            "args": {
+              "text": "checkout-api exits at startup because POOL_SIZE=0 in the checkout-config ConfigMap; the log says the pool size must be > 0.",
+              "evidence": [
+                "world:logs/checkout-api.log",
+                "world:k8s/configmaps/checkout-config.json"
+              ]
+            }
+          }
+        ],
+        "say": "The crash is caused by POOL_SIZE=0 in checkout-config."
+      },
+      {
+        "calls": [
+          {
+            "tool": "world",
+            "args": {
+              "op": "read",
+              "path": "logs/checkout-api.log"
+            }
+          },
+          {
+            "tool": "observe",
+            "args": {
+              "text": "After the fix checkout-api starts and reports a ready database pool; no FATAL line remains.",
+              "evidence": [
+                "world:logs/checkout-api.log",
+                "world:k8s/status/checkout-api.txt"
+              ]
+            }
+          }
+        ],
+        "say": "Verified: the service is healthy after the change."
+      }
+    ],
+    "agent:builder": [
+      {
+        "calls": [
+          {
+            "tool": "world",
+            "args": {
+              "op": "grep",
+              "pattern": "POOL_SIZE"
+            }
+          },
+          {
+            "tool": "propose",
+            "args": {
+              "adapter": "world",
+              "verb": "set",
+              "path": "k8s/configmaps/checkout-config.json",
+              "key": "POOL_SIZE",
+              "value": "10",
+              "why": "A pool size of 0 makes startup fail; 10 is a safe small positive value. Verify by reading the log after rollout."
+            }
+          }
+        ],
+        "say": "I proposed setting POOL_SIZE to 10; waiting for a human decision."
+      },
+      {
+        "calls": [],
+        "say": "Fix applied; the scout confirms the logs are clean."
+      }
+    ]
+  },
+  "expect": {
+    "events": {
+      "observation.recorded": {
+        "min": 2
+      },
+      "decision.requested": {
+        "min": 1,
+        "max": 1
+      },
+      "decision.resolved": {
+        "min": 1,
+        "max": 1
+      },
+      "action.executed": {
+        "min": 1,
+        "max": 1
+      }
+    },
+    "findings": {
+      "min": 2,
+      "some": [
+        {
+          "text": {
+            "matches": "POOL_SIZE"
+          }
+        }
+      ]
+    },
+    "proposals": {
+      "min": 1,
+      "max": 2,
+      "some": [
+        {
+          "adapter": "world",
+          "key": "POOL_SIZE",
+          "value": {
+            "gt": 0
+          }
+        }
+      ]
+    },
+    "world": [
+      {
+        "path": "k8s/configmaps/checkout-config.json",
+        "matches": "\"POOL_SIZE\": \"10\""
+      },
+      {
+        "path": "logs/checkout-api.log",
+        "absent": "FATAL"
+      }
+    ],
+    "denied": {
+      "tools": {
+        "max": 0
+      },
+      "decisions": {
+        "max": 0
+      },
+      "writes": {
+        "max": 0
+      }
+    },
+    "budget": {
+      "maxToolCalls": 20
+    }
+  }
+}

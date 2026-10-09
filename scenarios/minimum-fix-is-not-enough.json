@@ -1,0 +1,284 @@
+{
+  "id": "minimum-fix-is-not-enough",
+  "title": "The minimal fix is not enough",
+  "goal": "checkout-api keeps failing after a restart. A first triage says: raise POOL_SIZE. Find out whether that is sufficient before anything is applied.",
+  "kickoff": "Triage says the fix is POOL_SIZE=10 on checkout-config. Please check whether that really resolves it, including anything it depends on.",
+  "language": "English",
+  "rounds": 2,
+  "model": "deepseek-v4-flash",
+  "world": {
+    "files": {
+      "k8s/configmaps/checkout-config.json": "{\n  \"apiVersion\": \"v1\",\n  \"kind\": \"ConfigMap\",\n  \"metadata\": {\n    \"name\": \"checkout-config\",\n    \"namespace\": \"demo-apps\"\n  },\n  \"data\": {\n    \"POOL_SIZE\": \"0\",\n    \"REGION\": \"eu-north-1\",\n    \"FEATURE_NEW_CART\": \"true\"\n  }\n}\n",
+      "k8s/deployments/checkout-api.yaml": "name: checkout-api\nconfigMap: checkout-config\ncommand: fail if POOL_SIZE <= 0\n",
+      "k8s/status/checkout-api.txt": "checkout-api  CrashLoopBackOff  restarts=14\n",
+      "logs/checkout-api.log": "checkout-api starting (region=eu-north-1, new_cart=true)\nFATAL: database pool size must be > 0 (POOL_SIZE=0)\n",
+      "k8s/configmaps/orders-config.json": "{\n  \"metadata\": {\n    \"name\": \"orders-config\"\n  },\n  \"data\": {\n    \"WORKERS\": \"0\",\n    \"REGION\": \"eu-north-1\"\n  }\n}\n",
+      "k8s/deployments/orders-api.yaml": "name: orders-api\nconfigMap: orders-config\nnote: checkout-api calls orders-api on startup; WORKERS=0 means requests queue forever\n",
+      "logs/orders-api.log": "orders-api: accepting requests, 0 workers, queue growing\n"
+    },
+    "effects": [
+      {
+        "when": {
+          "path": "k8s/configmaps/checkout-config.json",
+          "matches": "\"POOL_SIZE\": \"0\""
+        },
+        "set": {
+          "k8s/status/checkout-api.txt": "checkout-api  CrashLoopBackOff  restarts=14\n",
+          "logs/checkout-api.log": "checkout-api starting (region=eu-north-1, new_cart=true)\nFATAL: database pool size must be > 0 (POOL_SIZE=0)\n"
+        }
+      },
+      {
+        "when": {
+          "path": "k8s/configmaps/checkout-config.json",
+          "matches": "\"POOL_SIZE\": \"[1-9]"
+        },
+        "set": {
+          "k8s/status/checkout-api.txt": "checkout-api  Running  restarts=0\n",
+          "logs/checkout-api.log": "checkout-api starting (region=eu-north-1, new_cart=true)\ndatabase pool ready: connections\nlistening on :8080\n"
+        }
+      },
+      {
+        "when": {
+          "path": "k8s/configmaps/orders-config.json",
+          "matches": "\"WORKERS\": \"0\""
+        },
+        "set": {
+          "logs/orders-api.log": "orders-api: accepting requests, 0 workers, queue growing\n"
+        }
+      },
+      {
+        "when": {
+          "path": "k8s/configmaps/orders-config.json",
+          "matches": "\"WORKERS\": \"[1-9]"
+        },
+        "set": {
+          "logs/orders-api.log": "orders-api: 4 workers ready, queue empty\n"
+        }
+      },
+      {
+        "when": {
+          "path": "logs/orders-api.log",
+          "matches": "0 workers"
+        },
+        "set": {
+          "logs/checkout-api.log": "checkout-api starting (region=eu-north-1, new_cart=true)\nFATAL: database pool size must be > 0 (POOL_SIZE=0)\nWARN: orders-api not responding, startup order check failed\n"
+        }
+      }
+    ]
+  },
+  "actors": [
+    {
+      "id": "human:alice",
+      "kind": "human",
+      "capabilities": [
+        "read",
+        "write",
+        "decide"
+      ]
+    },
+    {
+      "id": "agent:scout",
+      "kind": "agent",
+      "capabilities": [
+        "read",
+        "write"
+      ],
+      "tools": [
+        "world",
+        "observe"
+      ],
+      "system": "You are scout. You investigate the world with the world tool, doubt assumptions, and record every finding with evidence."
+    },
+    {
+      "id": "agent:builder",
+      "kind": "agent",
+      "capabilities": [
+        "read",
+        "write"
+      ],
+      "tools": [
+        "world",
+        "observe",
+        "propose"
+      ],
+      "system": "You are builder. You propose one concrete, minimal fix with the propose tool (adapter=world, verb=set, path, key, value) and say how it will be verified."
+    }
+  ],
+  "humanPosts": [],
+  "decide": [
+    {
+      "actor": "human:alice",
+      "when": {
+        "adapter": "world",
+        "key": "POOL_SIZE",
+        "value": {
+          "gt": 0
+        }
+      },
+      "answer": "yes"
+    },
+    {
+      "actor": "human:alice",
+      "when": {
+        "adapter": "world",
+        "key": "WORKERS",
+        "value": {
+          "gt": 0
+        }
+      },
+      "answer": "yes"
+    },
+    {
+      "actor": "human:alice",
+      "answer": "no"
+    }
+  ],
+  "script": {
+    "agent:scout": [
+      {
+        "calls": [
+          {
+            "tool": "world",
+            "args": {
+              "op": "grep",
+              "pattern": "orders|WORKERS"
+            }
+          },
+          {
+            "tool": "world",
+            "args": {
+              "op": "read",
+              "path": "k8s/configmaps/orders-config.json"
+            }
+          },
+          {
+            "tool": "observe",
+            "args": {
+              "text": "POOL_SIZE=0 breaks checkout-api, but orders-api also has WORKERS=0, which queues requests forever; fixing POOL_SIZE alone would leave checkout failing its dependency check.",
+              "evidence": [
+                "world:k8s/configmaps/orders-config.json",
+                "world:logs/orders-api.log"
+              ]
+            }
+          }
+        ],
+        "say": "The minimal fix is not sufficient: orders-api needs workers too."
+      },
+      {
+        "calls": [
+          {
+            "tool": "world",
+            "args": {
+              "op": "read",
+              "path": "logs/checkout-api.log"
+            }
+          },
+          {
+            "tool": "observe",
+            "args": {
+              "text": "With both settings fixed, checkout-api starts cleanly and orders-api has workers.",
+              "evidence": [
+                "world:logs/checkout-api.log",
+                "world:logs/orders-api.log"
+              ]
+            }
+          }
+        ],
+        "say": "Both services are healthy."
+      }
+    ],
+    "agent:builder": [
+      {
+        "calls": [
+          {
+            "tool": "propose",
+            "args": {
+              "adapter": "world",
+              "verb": "set",
+              "path": "k8s/configmaps/checkout-config.json",
+              "key": "POOL_SIZE",
+              "value": "10",
+              "why": "Pool size 0 aborts startup."
+            }
+          },
+          {
+            "tool": "propose",
+            "args": {
+              "adapter": "world",
+              "verb": "set",
+              "path": "k8s/configmaps/orders-config.json",
+              "key": "WORKERS",
+              "value": "4",
+              "why": "checkout-api depends on orders-api; with 0 workers it never answers."
+            }
+          }
+        ],
+        "say": "Two changes proposed, both needed."
+      },
+      {
+        "calls": [],
+        "say": "Both applied."
+      }
+    ]
+  },
+  "expect": {
+    "events": {
+      "action.executed": {
+        "min": 2,
+        "max": 2
+      }
+    },
+    "findings": {
+      "min": 2,
+      "some": [
+        {
+          "text": {
+            "matches": "orders"
+          }
+        }
+      ]
+    },
+    "proposals": {
+      "min": 2,
+      "some": [
+        {
+          "key": "POOL_SIZE",
+          "value": {
+            "gt": 0
+          }
+        },
+        {
+          "key": "WORKERS",
+          "value": {
+            "gt": 0
+          }
+        }
+      ]
+    },
+    "world": [
+      {
+        "path": "k8s/configmaps/checkout-config.json",
+        "matches": "\"POOL_SIZE\": \"10\""
+      },
+      {
+        "path": "k8s/configmaps/orders-config.json",
+        "matches": "\"WORKERS\": \"4\""
+      },
+      {
+        "path": "logs/checkout-api.log",
+        "absent": "FATAL|WARN"
+      }
+    ],
+    "denied": {
+      "tools": {
+        "max": 0
+      },
+      "decisions": {
+        "max": 0
+      },
+      "writes": {
+        "max": 0
+      }
+    }
+  }
+}

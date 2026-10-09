@@ -4,18 +4,19 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
- * V2 read-only tools. Allowlist, not blocklist: only kubectl read verbs in
- * explicitly permitted namespaces. No exec, patch, apply, delete — ever.
+ * Read-only tools. Allowlist, not blocklist: only kubectl read verbs in
+ * explicitly permitted namespaces (PIO_K8S_NAMESPACES, default demo-apps). No exec, patch, apply, delete — ever.
  */
-const ALLOWED_NS = new Set(["demo-apps"]);
 const ALLOWED_VERBS = new Set(["get", "describe", "logs"]);
-const ALLOWED_RES = new Set(["configmap", "configmaps", "deployment", "deployments", "pod", "pods", "service", "services", "events"]);
+
+/** Comma-separated env list, evaluated per call so operators can change policy without code. */
+function envSet(name: string, fallback: string): Set<string> {
+  return new Set((process.env[name] ?? fallback).split(",").map((x) => x.trim()).filter(Boolean));
+}
+export const allowedNamespaces = () => envSet("PIO_K8S_NAMESPACES", "demo-apps");
+const allowedResources = () => envSet("PIO_K8S_RESOURCES", "configmap,configmaps,deployment,deployments,pod,pods,service,services,events");
 
 export type ToolResult = { ok: boolean; output: string };
-
-export function describeTools(): string {
-  return "You have read-only tools k8s (kubectl get|describe|logs in demo-apps) and repo (ls|read the project source), plus observe and propose.";
-}
 
 /** Checkout root, derived from this file so the tool works wherever the repo lives. */
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -48,9 +49,9 @@ export async function runTool(call: { tool?: string; verb?: string; res?: string
   if (call.tool === "repo") return repoRead(call.op ?? "", call.path ?? "", call.lines ?? 120);
   if (call.tool !== "k8s") return { ok: false, output: "unknown tool" };
   const { verb = "", res = "", name = "", ns = "" } = call;
-  if (!ALLOWED_NS.has(ns)) return { ok: false, output: `forbidden namespace: ${ns}` };
+  if (!allowedNamespaces().has(ns)) return { ok: false, output: `forbidden namespace: ${ns}` };
   if (!ALLOWED_VERBS.has(verb)) return { ok: false, output: `forbidden verb: ${verb}` };
-  if (!ALLOWED_RES.has(res)) return { ok: false, output: `forbidden resource: ${res}` };
+  if (!allowedResources().has(res)) return { ok: false, output: `forbidden resource: ${res}` };
   const args = [verb, res];
   if (name) {
     if (!/^[a-z0-9-]+$/.test(name)) return { ok: false, output: "bad name" };

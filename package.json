@@ -9,7 +9,10 @@
   "scripts": {
     "start": "node src/http/server.ts",
     "typecheck": "tsc -p .",
-    "test": "node --test test/*.test.ts"
+    "test": "node --test test/*.test.ts",
+    "check": "npm run typecheck && npm test",
+    "sim": "node scripts/simulate.ts scenarios",
+    "sim:live": "node scripts/simulate.ts scenarios --live"
   },
   "dependencies": {
     "@earendil-works/chord": "^1.0.4",

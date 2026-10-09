@@ -11,14 +11,17 @@ assistance.requested/answered, decision.requested/resolved, action.proposed/exec
 
 ```
 src/core/    Store (SQLite, migrations), types — imports only itself + node:*
+src/sim/     scenario (parse/validate), world, matcher, invariants, runner, report
+scenarios/   plain-JSON cases: checkout-incident, minimum-fix-is-not-enough,
+             rights-are-enforced, only-the-right-human-decides, human-says-no
 src/agents/  loop.ts (turn edge: read case → Pi conversation → post reply),
              pi-tools.ts (Pi extension: k8s, repo, observe, propose),
              durable.ts (one durable Pi conversation per context+actor),
              tools.ts (read-only allowlists), executor.ts (gated writes)
 src/http/    server.ts (node:http JSON + SSE, same rules as the core)
-test/        synthetic, tools (allowlist), approval (gate), runs (ledger),
-             agent (Pi tool loop with a scripted faux model, offline)
-scripts/     run-case.ts — unified runner, see --help-ish args in file
+test/        synthetic, tools, approval, runs, auth, agent (Pi tool loop), restart,
+             sim (every scenario file, validation, invariants catch violations)
+scripts/     simulate.ts (scenario runner), ask-expert.ts, brief-case.ts
 data/        live DBs; data/archive/ — frozen V1–V3 runs, keep readable, don't write
 ```
 
@@ -28,10 +31,36 @@ Gateway bearer: `PIO_GATEWAY_BEARER`, or the file in `PIO_BEARER_FILE`.
 
 ```sh
 npm install
-npm test && npm run typecheck
-node scripts/run-case.ts --db ./data/case.sqlite --case case-checkout-2 --rounds 3   # needs the gateway
+npm run check                                   # typecheck + every test + every scenario (scripted, offline)
+npm run sim                                     # all scenarios, scripted, with a full report each
+node scripts/simulate.ts scenarios/checkout-incident.json
+npm run sim:live -- --model deepseek-v4-flash   # the same scenarios with a real model
 PIO_PORT=8899 PIO_DATA=./data/piople.sqlite node src/http/server.ts
 ```
+
+Needs Node >= 22.19 (`/opt/opencode-go-node/bin` on this host). CI runs `typecheck` + `test`;
+the live-cluster test skips itself when no `demo-apps` cluster is reachable.
+
+## Simulation (scenarios are data)
+
+`scenarios/*.json` describe a whole case: actors (humans and agents with capabilities, tools,
+presence), a `world` (virtual files + reactive `effects`), what the humans say and how they
+decide (`humanPosts`, `decide` rules), an optional deterministic `script` per agent, and
+`expect`ations. Nothing about checkout services lives in code. Add a file and it is a new test:
+`test/sim.test.ts` runs every file in `scenarios/` scripted and fails on any broken invariant
+or expectation. The same file runs live with a real model; only the agents' behavior differs.
+
+Always checked (see `src/sim/invariants.ts`): log ordered + one event per key; only members act;
+proposals bound to a decision; only `decide` holders resolve; nothing runs without a human `yes`;
+the world changes only through approved actions. Quality (reported, not blocking in live runs):
+findings cite evidence; no empty messages. Rights are tested by attempts: an agent calling a tool
+it was not granted, a read-only human posting, an echo delegate or observer deciding. Each must be
+refused (`expect.denied`). Reports (`data/sim/*.json|md`) carry metrics (tokens, tool calls, refusals,
+per-actor stats), the world diff and the event timeline.
+
+Live runs need a gateway: `PIO_GATEWAY` (default the host gateway; `https://opencode.ai/zen/go/v1`
+works) and a bearer from `PIO_GATEWAY_BEARER`, `OPENCODE_API_KEY` or `PIO_BEARER_FILE`.
+The scripted path is proven here; the live path has not been run against a real model yet.
 
 Models via host gateway `http://10.91.1.1:8788/v1` (bearer `gateway-bearer`,
 27 models, `x-session-id` per conversation). Default cheap `deepseek-v4-flash`,
@@ -148,7 +177,8 @@ No new core concepts; reliability limits only.
   durable replay-safe task and resumes after a crash. Identity is never a tool argument: the
   conversation id resolves to (context, actor) via `pi_convs`, and every tool goes through the
   Store, so rights are enforced there. `test/agent.test.ts` proves it offline with pi-ai's faux
-  provider. `run-case.ts` is always durable now (the `--durable` flag is gone).
+  provider. `run-case.ts` and `restart-proof.ts` are gone: `scripts/simulate.ts` runs scenarios (always
+  durable) and `test/restart.test.ts` proves close+reopen offline.
 - Next, per the design conversation: one real task that is not Kubernetes (a real repo + tests),
   two Pi agents + a human, case memory instead of shared channels. No new core concepts until
   that task shows one is missing.

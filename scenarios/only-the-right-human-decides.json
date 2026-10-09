@@ -1,0 +1,194 @@
+{
+  "id": "only-the-right-human-decides",
+  "title": "Echo delegates and read-only humans cannot decide",
+  "goal": "A fix is proposed; the first deciders in line are not allowed to approve it.",
+  "kickoff": "Fix checkout-api. Bob is away with an echo delegate; Carol is only an observer.",
+  "language": "English",
+  "rounds": 2,
+  "model": "deepseek-v4-flash",
+  "world": {
+    "files": {
+      "k8s/configmaps/checkout-config.json": "{\n  \"apiVersion\": \"v1\",\n  \"kind\": \"ConfigMap\",\n  \"metadata\": {\n    \"name\": \"checkout-config\",\n    \"namespace\": \"demo-apps\"\n  },\n  \"data\": {\n    \"POOL_SIZE\": \"0\",\n    \"REGION\": \"eu-north-1\",\n    \"FEATURE_NEW_CART\": \"true\"\n  }\n}\n",
+      "k8s/deployments/checkout-api.yaml": "name: checkout-api\nconfigMap: checkout-config\ncommand: fail if POOL_SIZE <= 0\n",
+      "k8s/status/checkout-api.txt": "checkout-api  CrashLoopBackOff  restarts=14\n",
+      "logs/checkout-api.log": "checkout-api starting (region=eu-north-1, new_cart=true)\nFATAL: database pool size must be > 0 (POOL_SIZE=0)\n"
+    },
+    "effects": [
+      {
+        "when": {
+          "path": "k8s/configmaps/checkout-config.json",
+          "matches": "\"POOL_SIZE\": \"0\""
+        },
+        "set": {
+          "k8s/status/checkout-api.txt": "checkout-api  CrashLoopBackOff  restarts=14\n",
+          "logs/checkout-api.log": "checkout-api starting (region=eu-north-1, new_cart=true)\nFATAL: database pool size must be > 0 (POOL_SIZE=0)\n"
+        }
+      },
+      {
+        "when": {
+          "path": "k8s/configmaps/checkout-config.json",
+          "matches": "\"POOL_SIZE\": \"[1-9]"
+        },
+        "set": {
+          "k8s/status/checkout-api.txt": "checkout-api  Running  restarts=0\n",
+          "logs/checkout-api.log": "checkout-api starting (region=eu-north-1, new_cart=true)\ndatabase pool ready: connections\nlistening on :8080\n"
+        }
+      }
+    ]
+  },
+  "actors": [
+    {
+      "id": "human:alice",
+      "kind": "human",
+      "capabilities": [
+        "read",
+        "write",
+        "decide"
+      ]
+    },
+    {
+      "id": "human:bob",
+      "kind": "human",
+      "capabilities": [
+        "read",
+        "write",
+        "decide"
+      ],
+      "presence": {
+        "state": "away",
+        "echo": true
+      }
+    },
+    {
+      "id": "human:carol",
+      "kind": "human",
+      "capabilities": [
+        "read"
+      ]
+    },
+    {
+      "id": "agent:scout",
+      "kind": "agent",
+      "capabilities": [
+        "read",
+        "write"
+      ],
+      "tools": [
+        "world",
+        "observe"
+      ],
+      "system": "You are scout. You investigate the world with the world tool, doubt assumptions, and record every finding with evidence."
+    },
+    {
+      "id": "agent:builder",
+      "kind": "agent",
+      "capabilities": [
+        "read",
+        "write"
+      ],
+      "tools": [
+        "world",
+        "observe",
+        "propose"
+      ],
+      "system": "You are builder. You propose one concrete, minimal fix with the propose tool (adapter=world, verb=set, path, key, value) and say how it will be verified."
+    }
+  ],
+  "humanPosts": [],
+  "decide": [
+    {
+      "actor": "human:bob",
+      "answer": "yes"
+    },
+    {
+      "actor": "human:carol",
+      "answer": "yes"
+    },
+    {
+      "actor": "human:alice",
+      "when": {
+        "adapter": "world",
+        "key": "POOL_SIZE",
+        "value": {
+          "gt": 0
+        }
+      },
+      "answer": "yes"
+    }
+  ],
+  "script": {
+    "agent:scout": [
+      {
+        "calls": [
+          {
+            "tool": "world",
+            "args": {
+              "op": "read",
+              "path": "logs/checkout-api.log"
+            }
+          },
+          {
+            "tool": "observe",
+            "args": {
+              "text": "POOL_SIZE=0 aborts startup.",
+              "evidence": [
+                "world:logs/checkout-api.log"
+              ]
+            }
+          }
+        ],
+        "say": "Cause found."
+      },
+      {
+        "calls": [],
+        "say": "Healthy."
+      }
+    ],
+    "agent:builder": [
+      {
+        "calls": [
+          {
+            "tool": "propose",
+            "args": {
+              "adapter": "world",
+              "verb": "set",
+              "path": "k8s/configmaps/checkout-config.json",
+              "key": "POOL_SIZE",
+              "value": "10",
+              "why": "Pool size 0 aborts startup."
+            }
+          }
+        ],
+        "say": "Proposed."
+      },
+      {
+        "calls": [],
+        "say": "Done."
+      }
+    ]
+  },
+  "expect": {
+    "events": {
+      "decision.resolved": {
+        "min": 1,
+        "max": 1
+      },
+      "action.executed": {
+        "min": 1,
+        "max": 1
+      }
+    },
+    "world": [
+      {
+        "path": "k8s/configmaps/checkout-config.json",
+        "matches": "\"POOL_SIZE\": \"10\""
+      }
+    ],
+    "denied": {
+      "decisions": {
+        "min": 2,
+        "max": 2
+      }
+    }
+  }
+}
