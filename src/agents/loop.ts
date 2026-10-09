@@ -88,7 +88,7 @@ export async function agentTurn(s: Store, cfg: AgentConfig): Promise<{ kind: "me
 
 function finish(s: Store, cfg: AgentConfig, text: string, usage: unknown, toolCalls: number, toolLog: string[]) {
   const clean = text.replace(/^TOOLCALL\s+\{.*\}\s*/m, "").trim() || text;
-  const key = `v2:${cfg.actorId}:${Date.now()}`;
+  const key = `turn:${cfg.actorId}:${Date.now()}`;
   const evidence = [`model:${cfg.model}`, ...toolLog.map((t) => `tool:${t.slice(0, 120)}`)];
   // PROPOSE: {"verb":"patch","res":"configmap","ns":"demo-apps","name":"checkout-config","patch":{...},"why":"..."}
   const pm = /^PROPOSE:\s*(\{.*\})\s*$/m.exec(clean);
