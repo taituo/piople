@@ -11,7 +11,9 @@
     "typecheck": "tsc -p .",
     "test": "node --test test/*.test.ts"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@earendil-works/pi-ai": "^1.0.4"
+  },
   "devDependencies": {
     "@types/node": "^22.20.5",
     "typescript": "^5.9.3"

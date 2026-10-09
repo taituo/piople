@@ -1,12 +1,12 @@
 import fs from "node:fs";
+import type { Models } from "@earendil-works/pi-ai";
 import { Store } from "../core/index.ts";
 import { describeTools, runTool } from "./tools.ts";
+import { createGateway, textOf } from "./pi-provider.ts";
 
 /**
- * V1 agent loop, deliberately primitive: no Pi SDK yet.
- * Reads the shared context, calls the gateway (OpenAI-compatible),
- * writes the answer back as message or observation.
- * Purpose: learn the loop shape before adopting pi-ai / pi-durable.
+ * B1: Pi owns model transport (pi-ai provider on the gateway).
+ * The loop still owns the protocol: read context → ask model → write back.
  */
 
 export type AgentConfig = {
@@ -17,10 +17,17 @@ export type AgentConfig = {
   baseUrl: string;
   bearer: string;
   maxTokens: number;
+  /** Injected Pi models (tests). Built from baseUrl/bearer/model when absent. */
+  pi?: Models;
 };
 
 export function readBearer(path = "/home/tiny/.config/opencode-go-gateway/gateway-bearer"): string {
   return fs.readFileSync(path, "utf8").trim();
+}
+
+/** Strip model control-token leakage (e.g. DeepSeek <ds_s>) before parsing. */
+export function sanitize(text: string): string {
+  return text.replace(/<[a-zA-Z_|][a-zA-Z0-9_|]*>/g, "");
 }
 
 export function contextPrompt(s: Store, contextId: string, goal: string, lastN = 30): string {
@@ -39,18 +46,29 @@ export function contextPrompt(s: Store, contextId: string, goal: string, lastN =
 }
 
 async function chat(cfg: AgentConfig, messages: Array<{ role: string; content: string }>): Promise<{ text: string; usage: { prompt_tokens?: number; completion_tokens?: number } }> {
-  const res = await fetch(`${cfg.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${cfg.bearer}`,
-      "x-session-id": `piople-${cfg.contextId}-${cfg.actorId}`,
+  const pi = cfg.pi ?? createGateway(cfg.baseUrl, cfg.bearer, [cfg.model]).models;
+  const model = pi.getModel("piople", cfg.model);
+  if (!model) throw new Error(`model not registered: ${cfg.model}`);
+  const system = messages.find((m) => m.role === "system")?.content ?? "";
+  // pi-ai 1.0.4 openai-completions crashes on string-form assistant messages
+  // ("Cannot read properties of undefined (reading 'length')"): send blocks.
+  // It also chokes on the `timestamp` field: omit it entirely.
+  const rest = messages.filter((m) => m.role !== "system").map((m) => ({
+    role: m.role as "user" | "assistant",
+    content: m.role === "assistant" ? [{ type: "text" as const, text: m.content }] : m.content,
+  }));
+  const msg = await pi.completeSimple(model, { systemPrompt: system, messages: rest } as never, {
+    maxTokens: cfg.maxTokens,
+    transformHeaders: (h: Record<string, string | null>) => ({ ...h, "x-session-id": `piople-${cfg.contextId}-${cfg.actorId}` }),
+  } as never);
+  const usage = (msg as { usage?: { input?: number; output?: number; prompt_tokens?: number; completion_tokens?: number } }).usage;
+  return {
+    text: textOf(msg as never).trim(),
+    usage: {
+      prompt_tokens: usage?.prompt_tokens ?? usage?.input ?? 0,
+      completion_tokens: usage?.completion_tokens ?? usage?.output ?? 0,
     },
-    body: JSON.stringify({ model: cfg.model, max_tokens: cfg.maxTokens, messages }),
-  });
-  if (!res.ok) throw new Error(`gateway ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  const json = (await res.json()) as { choices: Array<{ message: { content: string } }>; usage: { prompt_tokens?: number; completion_tokens?: number } };
-  return { text: (json.choices[0]?.message.content ?? "").trim(), usage: json.usage };
+  };
 }
 
 export async function agentTurn(s: Store, cfg: AgentConfig): Promise<{ kind: "message" | "observation"; text: string; usage: unknown; toolCalls: number }> {
@@ -68,7 +86,7 @@ export async function agentTurn(s: Store, cfg: AgentConfig): Promise<{ kind: "me
     const r = await chat(cfg, messages);
     usage.prompt_tokens! += r.usage.prompt_tokens ?? 0;
     usage.completion_tokens! += r.usage.completion_tokens ?? 0;
-    const m = /^TOOLCALL\s+(\{.*\})\s*$/m.exec(r.text);
+    const m = /^TOOLCALL\s+(\{.*\})\s*$/m.exec(sanitize(r.text));
     if (!m) {
       return finish(s, cfg, r.text, usage, toolCalls, toolLog);
     }
@@ -77,7 +95,7 @@ export async function agentTurn(s: Store, cfg: AgentConfig): Promise<{ kind: "me
     const result = await runTool(call as never);
     toolCalls++;
     toolLog.push(`${JSON.stringify(call)} -> ${result.output.slice(0, 300)}`);
-    messages.push({ role: "assistant", content: r.text });
+    messages.push({ role: "assistant", content: sanitize(r.text) });
     messages.push({ role: "user", content: `Tool result (ok=${result.ok}):\n${result.output.slice(0, 2000)}\n\nContinue. Answer with findings, not more tool calls unless strictly needed.` });
   }
   const r = await chat(cfg, messages);
@@ -87,6 +105,7 @@ export async function agentTurn(s: Store, cfg: AgentConfig): Promise<{ kind: "me
 }
 
 function finish(s: Store, cfg: AgentConfig, text: string, usage: unknown, toolCalls: number, toolLog: string[]) {
+  text = sanitize(text);
   const clean = text.replace(/^TOOLCALL\s+\{.*\}\s*/m, "").trim() || text;
   const key = `turn:${cfg.actorId}:${Date.now()}`;
   const evidence = [`model:${cfg.model}`, ...toolLog.map((t) => `tool:${t.slice(0, 120)}`)];
