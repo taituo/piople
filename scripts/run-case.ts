@@ -1,5 +1,5 @@
 import { Store } from "../src/core/index.ts";
-import { agentTurn, readBearer } from "../src/agents/loop.ts";
+import { agentTurn, readBearer, fullSystem } from "../src/agents/loop.ts";
 import { createGateway } from "../src/agents/pi-provider.ts";
 import { openDurable, ensureConv } from "../src/agents/durable.ts";
 
@@ -30,27 +30,27 @@ const now = Date.now();
 const runId = `run-${now}`;
 s.startRun(runId, CTX, MODEL, ROUNDS);
 
-for (const a of ["human:alice", "agent:scout", "agent:builder"]) {
+const agents = [
+  { actorId: arg("a1", "agent:scout"), system: arg("s1", "Olet scout: tutkit havaintoja, epäilet oletuksia, pyydät tarkennuksia.") },
+  { actorId: arg("a2", "agent:builder"), system: arg("s2", "Olet builder: ehdotat konkreettista korjausta ja kerrot miten se testataan.") },
+];
+for (const a of ["human:alice", agents[0]!.actorId, agents[1]!.actorId]) {
   s.upsertActor({ id: a, kind: a.startsWith("human:") ? "human" : "agent", name: a });
 }
 try {
   s.createContext({ id: CTX, kind: "case", title: TITLE, goal: GOAL, createdAt: now }, "human:alice");
 } catch { /* exists: continue */ }
-for (const [actor, caps] of [["agent:scout", ["read", "write"]], ["agent:builder", ["read", "write"]], ["human:alice", ["read", "write", "decide"]]] as const) {
+for (const [actor, caps] of [[agents[0]!.actorId, ["read", "write"]], [agents[1]!.actorId, ["read", "write"]], ["human:alice", ["read", "write", "decide"]]] as const) {
   s.join({ contextId: CTX, actorId: actor, capabilities: [...caps], joinedAt: Date.now() }, `join:${actor}:${now}`);
 }
 s.postMessage(CTX, "human:alice", `kickoff:${now}`, KICKOFF);
 
-const agents = [
-  { actorId: "agent:scout", system: "Olet scout: tutkit havaintoja, epäilet oletuksia, pyydät tarkennuksia." },
-  { actorId: "agent:builder", system: "Olet builder: ehdotat konkreettista korjausta ja kerrot miten se testataan." },
-];
 const USE_DURABLE = process.argv.includes("--durable");
 const durable = USE_DURABLE ? await openDurable(DATA + ".pi.sqlite", createGateway(BASE, bearer, [MODEL]).models) : undefined;
 const convs = new Map<string, Awaited<ReturnType<typeof ensureConv>>>();
 if (durable) {
   for (const a of agents) {
-    convs.set(a.actorId, await ensureConv(durable, s, CTX, a.actorId, a.system, { provider: "piople", modelId: MODEL }));
+    convs.set(a.actorId, await ensureConv(durable, s, CTX, a.actorId, fullSystem(a.system), { provider: "piople", modelId: MODEL }));
   }
 }
 let totalIn = 0, totalOut = 0, toolCalls = 0, proposals = 0;

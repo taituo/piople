@@ -73,6 +73,17 @@ every refusal. Identity header `x-piople-actor` is trusted dev-only
   `pi_convs` (migration 3). `run-case.ts --durable` sends only the newest
   user message per round; Pi holds the history. Restart proof
   (`scripts/restart-proof.ts`): full close+reopen → same conv id, same
-  requestId resubmits without duplicating work, `JUNIPER` remembered across
-  restart, protocol events intact. Known wart: duplicate-requestId resubmit
-  returns empty text instead of the original reply (no-op, fix later).
+  requestId resubmits without duplicating work (now returns the original
+  reply), `JUNIPER` remembered across restart, protocol events intact.
+  Full durable run `case-full-1`: 6 tool calls, 2 proposals.
+  Lesson: durable convs need the FULL system text at creation
+  (`fullSystem()`); bare role prompts drift into meta-chat with zero tool use.
+- **Second intent, same core**: `case-review-1` — reviewer+scout reviewed
+  `durable.ts`/`loop.ts` via new `repo` read-only tool (roots pinned, escapes
+  tested). Reviewer read real code, flagged a real uncertainty, noted its own
+  truncation limit. No core changes needed for a new domain.
+- **ask_expert** (`scripts/ask-expert.ts`): scout in checkout case consulted
+  reviewer in review case. Bounded snapshot over, answer with provenance back.
+  Expert explicitly could not see the other history — isolation holds.
+  Protocol: invited experts may answer without membership
+  (`isInvitedExpert`), strangers still blocked (tested).

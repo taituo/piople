@@ -69,7 +69,11 @@ export async function askConv(
   await conv.submit({ type: "input", content: text, requestId } as never, BACKGROUND_CONTEXT);
   await conv.waitForIdle(BACKGROUND_CONTEXT);
   const u1 = await sumUsage(d);
-  const { text: reply } = await newestAssistantSince(d, conv, before);
+  let { text: reply } = await newestAssistantSince(d, conv, before);
+  if (!reply) {
+    // Duplicate requestId: no new work happened; return the latest existing reply.
+    reply = (await newestAssistantSince(d, conv, 0)).text;
+  }
   return {
     text: sanitize(reply),
     usage: { prompt_tokens: u1.input - u0.input, completion_tokens: u1.output - u0.output },

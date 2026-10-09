@@ -38,6 +38,20 @@ test("four actors, one case, full loop with idempotent replay", () => {
   s.close();
 });
 
+test("invited expert answers without membership; stranger cannot", () => {
+  const s = memStore();
+  s.upsertActor({ id: "human:alice", kind: "human", name: "alice" });
+  s.upsertActor({ id: "agent:scout", kind: "agent", name: "scout" });
+  s.upsertActor({ id: "agent:outsider", kind: "agent", name: "outsider" });
+  s.createContext({ id: "case-i", kind: "case", title: "i", goal: "i", createdAt: Date.now() }, "human:alice");
+  s.join({ contextId: "case-i", actorId: "agent:scout", capabilities: ["read", "write"], joinedAt: Date.now() }, "j");
+  s.requestAssistance("case-i", "agent:scout", "q1", "agent:expert", "help?", {});
+  s.upsertActor({ id: "agent:expert", kind: "agent", name: "expert" });
+  s.answerAssistance("case-i", "agent:expert", "a1", "q1", "yes", ["e"]);
+  assert.throws(() => s.answerAssistance("case-i", "agent:outsider", "a2", "q1", "hi", []), /not-a-member/);
+  s.close();
+});
+
 test("non-member cannot write; events are append-only", () => {
   const s = memStore();
   s.upsertActor({ id: "human:alice", kind: "human", name: "alice" });

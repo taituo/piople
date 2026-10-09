@@ -80,10 +80,13 @@ async function chat(cfg: AgentConfig, messages: Array<{ role: string; content: s
   };
 }
 
+export function fullSystem(base: string): string {
+  return base + "\n\nReply in Finnish. Start with OBS: if you state a finding with evidence, otherwise plain chat. Keep it under 120 words.\nYou have read-only cluster tools. " + describeTools() + "\nNever invent log/config content: fetch it with a tool first.\nTo change anything, do NOT describe a kubectl patch command — instead reply with one line PROPOSE: {\"verb\":\"patch\",\"res\":\"configmap\",\"ns\":\"demo-apps\",\"name\":\"...\",\"patch\":{...},\"why\":\"...\"}. A human must approve before anything runs.";
+}
 export async function agentTurn(s: Store, cfg: AgentConfig): Promise<{ kind: "message" | "observation"; text: string; usage: unknown; toolCalls: number }> {
   const goalRow = s.db.prepare(`SELECT goal FROM contexts WHERE id=?`).get(cfg.contextId) as { goal: string } | undefined;
   const prompt = contextPrompt(s, cfg.contextId, goalRow?.goal ?? "");
-  const system = cfg.system + "\n\nReply in Finnish. Start with OBS: if you state a finding with evidence, otherwise plain chat. Keep it under 120 words.\nYou have read-only cluster tools. " + describeTools() + "\nNever invent log/config content: fetch it with a tool first.\nTo change anything, do NOT describe a kubectl patch command — instead reply with one line PROPOSE: {\"verb\":\"patch\",\"res\":\"configmap\",\"ns\":\"demo-apps\",\"name\":\"...\",\"patch\":{...},\"why\":\"...\"}. A human must approve before anything runs.";
+  const system = fullSystem(cfg.system);
   const messages: Array<{ role: string; content: string }> = [
     { role: "system", content: system },
     { role: "user", content: prompt + `\n\nYou are ${cfg.actorId}. What is your next contribution?` },

@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 
 /**
  * V2 read-only tools. Allowlist, not blocklist: only kubectl read verbs in
@@ -12,10 +14,34 @@ export type ToolResult = { ok: boolean; output: string };
 
 export function describeTools(): string {
   return `Tools (reply with exactly one line TOOLCALL <json> to use, max 3 per turn):
-{"tool":"k8s","verb":"get|describe|logs","res":"configmap|deployment|pod|service|events","name?":string,"ns":"demo-apps","tail?":number}`;
+{"tool":"k8s","verb":"get|describe|logs","res":"configmap|deployment|pod|service|events","name?":string,"ns":"demo-apps","tail?":number}
+{"tool":"repo","op":"ls|read","path":"src/...","lines?":number}`;
 }
 
-export async function runTool(call: { tool?: string; verb?: string; res?: string; name?: string; ns?: string; tail?: number }): Promise<ToolResult> {
+const REPO_ROOTS = ["/home/tiny/projects/piople/src", "/home/tiny/projects/piople/test", "/home/tiny/projects/piople/scripts"];
+
+function repoRead(op: string, rel: string, lines: number): ToolResult {
+  const abs = path.resolve("/home/tiny/projects/piople", rel);
+  if (!REPO_ROOTS.some((r) => abs === r || abs.startsWith(r + "/"))) return { ok: false, output: `forbidden path: ${rel}` };
+  try {
+    const st = fs.statSync(abs);
+    if (op === "ls") {
+      if (!st.isDirectory()) return { ok: false, output: "not a directory" };
+      return { ok: true, output: fs.readdirSync(abs).join("\n").slice(0, 2000) };
+    }
+    if (op === "read") {
+      if (!st.isFile()) return { ok: false, output: "not a file" };
+      const text = fs.readFileSync(abs, "utf8").split("\n").slice(0, Math.min(lines || 120, 200)).join("\n");
+      return { ok: true, output: text.slice(0, 4000) };
+    }
+    return { ok: false, output: `unknown repo op: ${op}` };
+  } catch (e) {
+    return { ok: false, output: `read failed: ${String((e as Error).message).slice(0, 200)}` };
+  }
+}
+
+export async function runTool(call: { tool?: string; verb?: string; res?: string; name?: string; ns?: string; tail?: number; op?: string; path?: string; lines?: number }): Promise<ToolResult> {
+  if (call.tool === "repo") return repoRead(call.op ?? "", call.path ?? "", call.lines ?? 120);
   if (call.tool !== "k8s") return { ok: false, output: "unknown tool" };
   const { verb = "", res = "", name = "", ns = "" } = call;
   if (!ALLOWED_NS.has(ns)) return { ok: false, output: `forbidden namespace: ${ns}` };

@@ -111,8 +111,22 @@ export class Store {
   }
 
   answerAssistance(contextId: Id, actorId: Id, key: string, requestKey: string, answer: string, evidence: string[]): PiopleEvent {
-    this.mustMember(contextId, actorId, "write");
+    if (!this.isMember(contextId, actorId) && !this.isInvitedExpert(contextId, actorId)) {
+      throw new Error(`not-a-member: ${actorId} not in ${contextId}`);
+    }
     return this.append({ type: "assistance.answered", contextId, actorId, key, data: { requestKey, answer, evidence } });
+  }
+
+  /** An expert named in an assistance.requested may answer once without membership. */
+  private isInvitedExpert(contextId: string, actorId: string): boolean {
+    const rows = this.db.prepare(`SELECT data FROM events WHERE context_id=? AND type='assistance.requested'`).all(contextId) as Array<{ data: string }>;
+    return rows.some((r) => {
+      try {
+        return (JSON.parse(r.data) as { to?: string }).to === actorId;
+      } catch {
+        return false;
+      }
+    });
   }
 
   requestDecision(d: Decision): PiopleEvent {
