@@ -54,8 +54,10 @@ piople --as agent:web work-claim --context c1 --next true          # -> {event, 
 piople --as agent:web work-complete --context c1 --id w1 --attempt 1 --result '"found"'
 piople help
 
-# MCP (e.g. from an agent host): identity comes from the env the host sets
+# MCP (e.g. from an agent host). Same machine as the database: identity from the env the host sets
 PIO_DATA=./data/p.sqlite PIO_ACTOR=agent:scout node --no-warnings src/mcp/server.ts
+# MCP from another machine, over HTTP: identity is the token's actor (PIO_ACTOR, if set, must agree)
+PIO_CORE_URL=http://core:8899 PIO_TOKEN=pio_... node --no-warnings src/mcp/server.ts
 ```
 
 ## Rules (enforced in Store, so identical for CLI and MCP)
@@ -147,7 +149,8 @@ anything over a network — `CoreClient` is the seam for that (phase D).
 
 ```sh
 # operator, next to the database: one credential per actor (shown once, stored hashed)
-node src/cli/admin.ts --db ./data/p.sqlite issue-token --actor agent:fetch
+node src/cli/admin.ts --db ./data/p.sqlite issue-token --actor agent:fetch [--ttl-ms 3600000]
+node src/cli/admin.ts --db ./data/p.sqlite list-tokens --actor agent:fetch    # created / expires / last used, never the secret
 node src/cli/admin.ts --db ./data/p.sqlite revoke-tokens --actor agent:fetch
 
 PIO_DATA=./data/p.sqlite PIO_PORT=8899 node src/http/main.ts      # binds 127.0.0.1 by default
@@ -161,7 +164,8 @@ const host = new Host(core);
 
 - **Identity is the token and nothing else.** The server derives the actor from the bearer
   token; no argument can name another caller. A host that serves several actors holds one
-  token per actor and can speak only as those. Tokens are stored as SHA-256 hashes, can be
+  token per actor and can speak only as those. Tokens are stored as SHA-256 hashes, can
+  expire (`--ttl-ms`), record when they were last used (at most one write a minute), can be
   revoked, and are minted only by the operator (not an op, not an event).
 - **Membership and capabilities are unchanged**: the same Store rules judge HTTP calls as
   CLI and MCP calls. A valid token buys identity, not power.
@@ -171,11 +175,13 @@ const host = new Host(core);
 - **Retries are safe.** `HttpCore` fixes an idempotency key/id before the first attempt, so
   a lost response replays on the server instead of duplicating. `work-claim --next` is the one
   op never retried blindly; a lost claim shows up under `work.mine` and is resumed.
-- Status codes: 401 no/bad token, 403 not allowed, 404 unknown op, 409 conflict (key reused,
+- **Bounded inputs.** One read returns at most 1000 events (page with the cursor); a work lease
+  must be a positive whole number of milliseconds; request bodies are capped.
+- Status codes: 401 no/bad/expired token, 403 not allowed, 404 unknown op, 409 conflict (key reused,
   stale claim, not open), 400 bad request, 413 too large.
 - **Plain HTTP.** A bearer token is a password: terminate TLS in front (ingress, proxy), keep
   the port off the open internet. There is no push channel yet; hosts poll their inbox.
-- Not in this phase: signature-based identity, multi-node Core, rate limiting, long-poll/SSE.
+- Not in this phase: signature-based identity, multi-node Core, rate limiting, long-poll/SSE, preventing two hosts from serving the same actor (run one replica per actor).
 
 ## Not built yet
 

@@ -1,15 +1,41 @@
 import { Store } from "../core/index.ts";
-import { OPS, runOp } from "../ops.ts";
+import { OPS, runOp, type Args } from "../ops.ts";
+import { HttpCore } from "../http/client.ts";
 
 /**
- * Minimal MCP server (stdio, JSON-RPC, no SDK). Exposes the same OPS as the CLI,
- * as tools named piople_<op>. Identity comes from PIO_ACTOR, set by the host
- * process — tool arguments can never change who is calling.
+ * Minimal MCP server (stdio, JSON-RPC, no SDK). Exposes the same OPS as the CLI, as tools named
+ * piople_<op>. Tool arguments can never change who is calling.
  *
- * Usage: PIO_DATA=./data/x.sqlite PIO_ACTOR=agent:ext node src/mcp/server.ts
+ * Local  (same machine as the database):
+ *   PIO_DATA=./data/x.sqlite PIO_ACTOR=agent:ext node src/mcp/server.ts
+ * Remote (any machine that can reach a Core over HTTP; identity is the token's actor):
+ *   PIO_CORE_URL=http://core:8899 PIO_TOKEN=pio_... node src/mcp/server.ts
  */
-const ACTOR = process.env.PIO_ACTOR ?? process.env.PIO_MCP_ACTOR ?? "agent:ext";
-const store = new Store(process.env.PIO_DATA ?? "./data/piople.sqlite");
+const remoteUrl = process.env.PIO_CORE_URL;
+let actor = process.env.PIO_ACTOR ?? process.env.PIO_MCP_ACTOR ?? "agent:ext";
+let store: Store | null = null;
+let call: (op: string, args: Args) => Promise<unknown>;
+
+if (remoteUrl) {
+  const token = process.env.PIO_TOKEN;
+  if (!token) die("PIO_CORE_URL needs PIO_TOKEN");
+  const res = await fetch(`${remoteUrl.replace(/\/+$/, "")}/v1/whoami`, { headers: { authorization: `Bearer ${token}` } }).catch((e: Error) => die(`cannot reach ${remoteUrl}: ${e.message}`));
+  if (!res.ok) die(`${remoteUrl} refused the token (HTTP ${res.status})`);
+  const who = ((await res.json()) as { actor: string }).actor;
+  if (process.env.PIO_ACTOR && process.env.PIO_ACTOR !== who) die(`PIO_ACTOR=${process.env.PIO_ACTOR} but the token belongs to ${who}`);
+  actor = who;
+  const core = new HttpCore(remoteUrl, { [actor]: token });
+  call = (op, args) => core.call(actor, op, args);
+} else {
+  store = new Store(process.env.PIO_DATA ?? "./data/piople.sqlite");
+  const local = store;
+  call = async (op, args) => runOp(local, actor, op, args);
+}
+
+function die(message: string): never {
+  process.stderr.write(`piople-mcp: ${message}\n`);
+  process.exit(1);
+}
 
 type Req = { jsonrpc: string; id?: number | string | null; method: string; params?: { name?: string; arguments?: Record<string, unknown> } };
 
@@ -28,7 +54,7 @@ const send = (msg: unknown) => process.stdout.write(JSON.stringify(msg) + "\n");
 const ok = (id: Req["id"], result: unknown) => send({ jsonrpc: "2.0", id, result });
 const err = (id: Req["id"], code: number, message: string) => send({ jsonrpc: "2.0", id, error: { code, message: message.slice(0, 300) } });
 
-function handle(req: Req) {
+async function handle(req: Req) {
   if (req.id === undefined) return; // notification
   if (req.method === "initialize") {
     return ok(req.id, { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "piople", version: "0.0.1" } });
@@ -38,7 +64,7 @@ function handle(req: Req) {
     const op = BY_TOOL.get(req.params?.name ?? "");
     if (!op) return err(req.id, -32602, `unknown tool: ${req.params?.name}`);
     try {
-      const out = runOp(store, ACTOR, op, req.params?.arguments ?? {});
+      const out = await call(op, req.params?.arguments ?? {});
       return ok(req.id, { content: [{ type: "text", text: JSON.stringify(out) }] });
     } catch (e) {
       // Protocol refusals are tool results, so the calling agent can see and react to them.
@@ -48,6 +74,8 @@ function handle(req: Req) {
   return err(req.id, -32601, `unknown method: ${req.method}`);
 }
 
+// Requests are answered in the order they arrive, also when a call goes over the network.
+let queue: Promise<void> = Promise.resolve();
 let buf = "";
 process.stdin.on("data", (d: Buffer) => {
   buf += d.toString("utf8");
@@ -55,11 +83,13 @@ process.stdin.on("data", (d: Buffer) => {
   buf = lines.pop() ?? "";
   for (const line of lines) {
     if (!line.trim()) continue;
-    try {
-      handle(JSON.parse(line) as Req);
-    } catch {
-      err(null, -32700, "parse error");
-    }
+    queue = queue.then(async () => {
+      try {
+        await handle(JSON.parse(line) as Req);
+      } catch {
+        err(null, -32700, "parse error");
+      }
+    });
   }
 });
-process.stdin.on("end", () => store.close());
+process.stdin.on("end", () => void queue.then(() => store?.close()));

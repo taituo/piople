@@ -79,6 +79,11 @@ CREATE TABLE tokens (
   created_at INTEGER NOT NULL, revoked_at INTEGER);
 CREATE INDEX tokens_actor ON tokens(actor_id);
 `,
+  // Migration 8: tokens may expire, and record when they were last used.
+  `
+ALTER TABLE tokens ADD COLUMN expires_at INTEGER;
+ALTER TABLE tokens ADD COLUMN last_used_at INTEGER;
+`,
 ];
 
 export type InboxSummary = { context: Id; title: string; cursor: number; unread: number; pending: number };
@@ -116,6 +121,8 @@ type Mutation = {
   write?: () => Record<string, unknown>;
 };
 
+/** One read never returns more than this many events; page with the cursor. */
+export const MAX_READ = 1000;
 const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
 
 export class Store {
@@ -466,6 +473,7 @@ export class Store {
   }
 
   private doClaim(w: WorkItem, actorId: Id, leaseMs: number | undefined, now: number): { event: PiopleEvent; work: WorkItem } {
+    if (leaseMs !== undefined && !(Number.isInteger(leaseMs) && leaseMs > 0)) throw new Error(`bad-lease: ${leaseMs} (positive whole milliseconds)`);
     const attempt = w.attempt + 1;
     const leaseUntil = leaseMs === undefined ? null : now + leaseMs;
     const event = this.mutate({
@@ -588,20 +596,30 @@ export class Store {
    * returned once and never stored; verification is by hash. A network host that serves several
    * actors holds one token per actor, so it can speak only as the actors it was given.
    */
-  issueToken(actorId: Id): string {
+  issueToken(actorId: Id, ttlMs?: number, now = Date.now()): string {
     if (!/^(human|agent):\S+$/.test(actorId)) throw new Error(`bad-actor: ${actorId} (expected human:<name> or agent:<name>)`);
+    if (ttlMs !== undefined && !(Number.isInteger(ttlMs) && ttlMs > 0)) throw new Error(`bad-ttl: ${ttlMs} (positive whole milliseconds)`);
     const token = `pio_${randomBytes(32).toString("base64url")}`;
     this.tx(() => {
       this.db.prepare(`INSERT INTO actors(id,kind,name) VALUES(?,?,?) ON CONFLICT(id) DO NOTHING`).run(actorId, actorId.startsWith("human:") ? "human" : "agent", actorId);
-      this.db.prepare(`INSERT INTO tokens(hash,actor_id,created_at) VALUES(?,?,?)`).run(hashToken(token), actorId, Date.now());
+      this.db.prepare(`INSERT INTO tokens(hash,actor_id,created_at,expires_at) VALUES(?,?,?,?)`).run(hashToken(token), actorId, now, ttlMs === undefined ? null : now + ttlMs);
     });
     return token;
   }
 
-  /** The actor a live token belongs to, or undefined. */
-  actorForToken(token: string): Id | undefined {
-    const r = this.db.prepare(`SELECT actor_id FROM tokens WHERE hash=? AND revoked_at IS NULL`).get(hashToken(token)) as { actor_id: string } | undefined;
-    return r?.actor_id;
+  /** The actor a live (not revoked, not expired) token belongs to, or undefined. Notes use at most once a minute. */
+  actorForToken(token: string, now = Date.now()): Id | undefined {
+    const hash = hashToken(token);
+    const r = this.db.prepare(`SELECT actor_id, last_used_at FROM tokens WHERE hash=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)`).get(hash, now) as { actor_id: string; last_used_at: number | null } | undefined;
+    if (!r) return undefined;
+    if (r.last_used_at === null || now - r.last_used_at >= 60_000) this.db.prepare(`UPDATE tokens SET last_used_at=? WHERE hash=?`).run(now, hash);
+    return r.actor_id;
+  }
+
+  /** Operator view of an actor's credentials. Never includes the secret. */
+  listTokens(actorId: Id): Array<{ createdAt: number; expiresAt: number | null; lastUsedAt: number | null; revokedAt: number | null }> {
+    return (this.db.prepare(`SELECT created_at, expires_at, last_used_at, revoked_at FROM tokens WHERE actor_id=? ORDER BY created_at, rowid`).all(actorId) as Array<{ created_at: number; expires_at: number | null; last_used_at: number | null; revoked_at: number | null }>)
+      .map((t) => ({ createdAt: t.created_at, expiresAt: t.expires_at, lastUsedAt: t.last_used_at, revokedAt: t.revoked_at }));
   }
 
   /** Revoke every live token of an actor. Returns how many. */
@@ -611,6 +629,7 @@ export class Store {
 
   /** Unchecked read, for internal and test use. Actors go through readEvents. */
   eventsSince(contextId: string, afterSeq: number, limit = 200): PiopleEvent[] {
+    limit = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), MAX_READ) : 200;
     const rows = this.db.prepare(`SELECT seq, ts, type, context_id, actor_id, key, data FROM events WHERE context_id=? AND seq>? ORDER BY seq ASC LIMIT ?`).all(contextId, afterSeq, limit) as Row[];
     return rows.map((r) => this.row(r));
   }
