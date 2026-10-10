@@ -1014,11 +1014,14 @@ export class Store {
 
   /** Everything an actor owes attention in one context, derived from open state. */
   pending(contextId: Id, actorId: Id): Pending {
+    // The answered keys are collected once and looked up: a correlated NOT EXISTS scanned the context's events for every ask,
+    // which is quadratic (4,000 asks took 1.3 s, and anyone who may write can create asks for someone else).
     const asks = this.db.prepare(`
+      WITH answered(k) AS (SELECT json_extract(data,'$.requestKey') FROM events WHERE context_id=? AND type='assistance.answered')
       SELECT r.key, r.actor_id AS from_actor, r.seq, json_extract(r.data,'$.question') AS question FROM events r
       WHERE r.context_id=? AND r.type='assistance.requested' AND json_extract(r.data,'$.to')=?
-        AND NOT EXISTS (SELECT 1 FROM events a WHERE a.context_id=r.context_id AND a.type='assistance.answered' AND json_extract(a.data,'$.requestKey')=r.key)
-      ORDER BY r.seq`).all(contextId, actorId) as Array<{ key: string; from_actor: string; seq: number; question: string }>;
+        AND r.key NOT IN (SELECT k FROM answered WHERE k IS NOT NULL)
+      ORDER BY r.seq`).all(contextId, contextId, actorId) as Array<{ key: string; from_actor: string; seq: number; question: string }>;
     const echo = (this.db.prepare(`SELECT echo FROM presence WHERE actor_id=?`).get(actorId) as { echo: number } | undefined)?.echo;
     const canDecide = !!this.caps(contextId, actorId)?.includes("decide") && !echo;
     const decisions = canDecide
