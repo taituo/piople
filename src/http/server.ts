@@ -15,7 +15,7 @@ import { runOp } from "../ops.ts";
 export type ServerOptions = { maxBody?: number };
 
 const STATUS: Array<[RegExp, number, string]> = [
-  [/^(forbidden|not-a-member)\b/, 403, "forbidden"],
+  [/^(forbidden|not-a-member|not-in-realm)\b/, 403, "forbidden"],
   [/^(key-conflict|stale-claim|work-not-claimable|decision-not-open)\b/, 409, "conflict"],
   [/^(unknown-[a-z]+)\b/, 404, "not-found"],
   [/^(missing|bad-[a-z]+|work-needs-target)\b/, 400, "bad-request"],

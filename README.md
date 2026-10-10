@@ -62,7 +62,8 @@ PIO_CORE_URL=http://core:8899 PIO_TOKEN=pio_... node --no-warnings src/mcp/serve
 
 ## Rules (enforced in Store, so identical for CLI and MCP)
 
-- Membership + capability (`read|write|decide`) checked on every op, including reads.
+- Membership + capability (`read|write|decide`) checked on every op, including reads, and bounded by the
+  context's realm.
 - **Joining is granted, not taken**: the granter needs `decide` and cannot hand
   out capabilities it does not hold. The creator starts with all three.
 - **One write path.** Every mutation runs in a single `BEGIN IMMEDIATE`
@@ -74,6 +75,35 @@ PIO_CORE_URL=http://core:8899 PIO_TOKEN=pio_... node --no-warnings src/mcp/serve
 - `events` is append-only (SQLite triggers).
 - Proposals never execute; a decision binds them. Echo delegates (away human)
   may answer but never decide. Invited experts may answer without membership.
+
+### Realms and channels
+
+A **realm** is the outer boundary of a collaboration area, a **channel** a topic stream inside it, a
+**case** a bounded piece of work. All three are contexts of a different `kind`, so they share events,
+membership, inbox and cursors; nothing else was added to Core.
+
+```sh
+piople --as human:alice create --kind realm   --id realm-infra --title "Infrastructure"
+piople --as human:alice join   --context realm-infra --actor human:bob --caps read,write
+piople --as human:bob   create --kind channel --realm realm-infra --id ch-incidents --title "Incidents"
+piople --as human:bob   create --realm realm-infra --parent ch-incidents --title "Checkout down"   # a case in the channel
+piople --as human:bob   targets    # what I may address: contexts I can write to, with my effective capabilities
+```
+
+- **The realm is the upper bound.** What an actor effectively holds in a context is its own
+  capabilities there cut down to what it holds in the context's realm, checked at every access. Lowering
+  a realm role lowers it everywhere inside the realm at once; a non-member of the realm has nothing in it.
+- **Joining** a context in a realm needs the target to be a member of the realm already, and cannot grant
+  more than the target holds there (`not-in-realm`, `forbidden`).
+- **Realm membership does not confer channel membership.** Joining a channel or case stays explicit.
+- **Creating inside a realm** needs `write` in the realm (and in the parent channel for a case). The
+  creator starts with everything its realm role allows.
+- A case under a channel lives in the channel's realm. Channels need a realm and have no parent. Contexts
+  without a realm behave exactly as before.
+- `inbox` shows each context's `kind` and `realm`.
+
+Not yet: removing members, and routing (choosing the realm/channel/recipient for a message) — see the
+routing plan; Core only provides the addressing (`targets`) and the rules above.
 
 ### Inbox: a participant need not be running
 

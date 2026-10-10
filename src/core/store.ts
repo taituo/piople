@@ -2,8 +2,8 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { dirname } from "node:path";
-import type { Actor, Artifact, Context, Decision, EventType, Id, Membership, PiopleEvent, WorkItem } from "./types.ts";
-import { EVENT_TYPES } from "./types.ts";
+import type { Actor, Artifact, Context, ContextKind, Decision, EventType, Id, Membership, PiopleEvent, WorkItem } from "./types.ts";
+import { CONTEXT_KINDS, EVENT_TYPES } from "./types.ts";
 
 const MIGRATIONS: string[] = [
   `
@@ -84,9 +84,18 @@ CREATE INDEX tokens_actor ON tokens(actor_id);
 ALTER TABLE tokens ADD COLUMN expires_at INTEGER;
 ALTER TABLE tokens ADD COLUMN last_used_at INTEGER;
 `,
+  // Migration 9: realms and channels. A realm is a context; contexts point at their realm and, for cases, a channel.
+  `
+ALTER TABLE contexts ADD COLUMN realm_id TEXT REFERENCES contexts(id);
+ALTER TABLE contexts ADD COLUMN parent_id TEXT REFERENCES contexts(id);
+CREATE INDEX contexts_realm ON contexts(realm_id);
+`,
 ];
 
-export type InboxSummary = { context: Id; title: string; cursor: number; unread: number; pending: number };
+/** Something an actor may address: a context it can write to, with the capabilities it effectively holds there. */
+export type Target = { id: Id; kind: ContextKind; title: string; realm: Id | null; parent: Id | null; capabilities: string[] };
+
+export type InboxSummary = { context: Id; title: string; kind: ContextKind; realm: Id | null; cursor: number; unread: number; pending: number };
 export type Pending = {
   /** assistance.requested addressed to me with no assistance.answered for its key */
   assistance: Array<{ key: string; from: Id; question: string; seq: number }>;
@@ -200,9 +209,27 @@ export class Store {
     return { seq: r.seq, ts: r.ts, type: r.type as EventType, contextId: r.context_id, actorId: r.actor_id, key: r.key, data: JSON.parse(r.data) };
   }
 
-  private caps(contextId: string, actorId: string): string[] | undefined {
+  private memberCaps(contextId: string, actorId: string): string[] | undefined {
     const m = this.db.prepare(`SELECT capabilities FROM members WHERE context_id=? AND actor_id=?`).get(contextId, actorId) as { capabilities: string } | undefined;
     return m ? (JSON.parse(m.capabilities) as string[]) : undefined;
+  }
+
+  private contextRow(id: Id): { kind: ContextKind; realm_id: Id | null; parent_id: Id | null } | undefined {
+    return this.db.prepare(`SELECT kind, realm_id, parent_id FROM contexts WHERE id=?`).get(id) as { kind: ContextKind; realm_id: Id | null; parent_id: Id | null } | undefined;
+  }
+
+  /**
+   * What an actor effectively holds in a context: its own capabilities there, cut down to what it holds in the
+   * context's realm. Checked at every access, not only when joining, so lowering or losing a realm role takes
+   * effect everywhere inside the realm at once.
+   */
+  private caps(contextId: string, actorId: string): string[] | undefined {
+    const own = this.memberCaps(contextId, actorId);
+    if (!own) return undefined;
+    const realm = this.contextRow(contextId)?.realm_id;
+    if (!realm) return own;
+    const bound = this.memberCaps(realm, actorId);
+    return bound ? own.filter((c) => bound.includes(c)) : undefined;
   }
 
   private mustMember(contextId: string, actorId: string, cap: string): void {
@@ -215,14 +242,40 @@ export class Store {
     this.db.prepare(`INSERT INTO actors(id,kind,name) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name`).run(a.id, a.kind, a.name);
   }
 
+  /** Where a new context sits, validated. A case under a channel lives in that channel's realm. */
+  private placement(c: Context, by: Id): { realm: Id | null; parent: Id | null } {
+    if (!CONTEXT_KINDS.includes(c.kind)) throw new Error(`bad-kind: ${c.kind} (case, channel or realm)`);
+    let realm = c.realmId ?? null;
+    const parent = c.parentId ?? null;
+    if (c.kind === "realm" && (realm || parent)) throw new Error(`bad-context: a realm has no realm or parent`);
+    if (c.kind === "channel" && (!realm || parent)) throw new Error(`bad-context: a channel needs a realm and has no parent`);
+    if (parent) {
+      const p = this.contextRow(parent);
+      if (!p || p.kind !== "channel") throw new Error(`bad-context: parent ${parent} is not a channel`);
+      if (realm && p.realm_id !== realm) throw new Error(`bad-context: channel ${parent} is in another realm`);
+      realm = p.realm_id;
+      this.mustMember(parent, by, "write");
+    }
+    if (realm) {
+      if (this.contextRow(realm)?.kind !== "realm") throw new Error(`bad-context: ${realm} is not a realm`);
+      this.mustMember(realm, by, "write");
+    }
+    return { realm, parent };
+  }
+
   createContext(c: Context, by: Id): PiopleEvent {
+    let where = { realm: null as Id | null, parent: null as Id | null };
     return this.mutate({
       type: "context.created", contextId: c.id, actorId: by, key: `create:${c.id}`,
+      check: () => { where = this.placement(c, by); },
       write: () => {
         this.db.prepare(`INSERT INTO actors(id,kind,name) VALUES(?,?,?) ON CONFLICT(id) DO NOTHING`).run(by, by.startsWith("human:") ? "human" : "agent", by);
-        this.db.prepare(`INSERT INTO contexts(id,kind,title,goal,created_at) VALUES(?,?,?,?,?)`).run(c.id, c.kind, c.title, c.goal, c.createdAt);
-        this.db.prepare(`INSERT INTO members(context_id,actor_id,capabilities,joined_at) VALUES(?,?,?,?)`).run(c.id, by, JSON.stringify(["read", "write", "decide"]), c.createdAt);
-        return { title: c.title };
+        this.db.prepare(`INSERT INTO contexts(id,kind,title,goal,created_at,realm_id,parent_id) VALUES(?,?,?,?,?,?,?)`).run(c.id, c.kind, c.title, c.goal, c.createdAt, where.realm, where.parent);
+        // The creator starts with everything it may hold in the realm (all three when standalone).
+        const bound = where.realm ? this.memberCaps(where.realm, by)! : ["read", "write", "decide"];
+        const caps = ["read", "write", "decide"].filter((x) => bound.includes(x));
+        this.db.prepare(`INSERT INTO members(context_id,actor_id,capabilities,joined_at) VALUES(?,?,?,?)`).run(c.id, by, JSON.stringify(caps), c.createdAt);
+        return { title: c.title, kind: c.kind, realm: where.realm, parent: where.parent };
       },
     });
   }
@@ -238,6 +291,13 @@ export class Store {
         this.mustMember(m.contextId, by, "decide");
         const extra = m.capabilities.filter((c) => !this.caps(m.contextId, by)!.includes(c));
         if (extra.length) throw new Error(`forbidden: ${by} cannot grant ${extra.join(",")}`);
+        const realm = this.contextRow(m.contextId)?.realm_id;
+        if (realm) {
+          const bound = this.memberCaps(realm, m.actorId);
+          if (!bound) throw new Error(`not-in-realm: ${m.actorId} must be a member of ${realm} before joining ${m.contextId}`);
+          const beyond = m.capabilities.filter((c) => !bound.includes(c));
+          if (beyond.length) throw new Error(`forbidden: ${m.actorId} holds only ${bound.join(",") || "nothing"} in ${realm}, cannot be granted ${beyond.join(",")}`);
+        }
       },
       write: () => {
         // The joiner may be known only by id (e.g. from another runtime); register it without renaming.
@@ -579,13 +639,24 @@ export class Store {
 
   /** What happened while I was away, across every context I can read. */
   inbox(actorId: Id): InboxSummary[] {
-    const ctxs = this.db.prepare(`SELECT c.id, c.title FROM contexts c JOIN members m ON m.context_id=c.id WHERE m.actor_id=? ORDER BY c.created_at, c.id`).all(actorId) as Array<{ id: string; title: string }>;
-    return ctxs.filter((c) => this.caps(c.id, actorId)!.includes("read")).map((c) => {
+    const ctxs = this.db.prepare(`SELECT c.id, c.title, c.kind, c.realm_id FROM contexts c JOIN members m ON m.context_id=c.id WHERE m.actor_id=? ORDER BY c.created_at, c.rowid`).all(actorId) as Array<{ id: string; title: string; kind: ContextKind; realm_id: Id | null }>;
+    return ctxs.filter((c) => this.caps(c.id, actorId)?.includes("read")).map((c) => {
       const cursor = this.cursor(c.id, actorId);
       const unread = (this.db.prepare(`SELECT COUNT(*) n FROM events WHERE context_id=? AND seq>? AND actor_id<>?`).get(c.id, cursor, actorId) as { n: number }).n;
       const p = this.pending(c.id, actorId);
-      return { context: c.id, title: c.title, cursor, unread, pending: p.assistance.length + p.decisions.length + p.work.open.length + p.work.mine.length };
+      return { context: c.id, title: c.title, kind: c.kind, realm: c.realm_id, cursor, unread, pending: p.assistance.length + p.decisions.length + p.work.open.length + p.work.mine.length };
     });
+  }
+
+  /** Everything this actor may address: contexts (realms, channels, cases) it can write to, with what it effectively holds there. */
+  targets(actorId: Id): Target[] {
+    const rows = this.db.prepare(`SELECT c.id, c.kind, c.title, c.realm_id, c.parent_id FROM contexts c JOIN members m ON m.context_id=c.id WHERE m.actor_id=? ORDER BY c.created_at, c.rowid`).all(actorId) as Array<{ id: string; kind: ContextKind; title: string; realm_id: Id | null; parent_id: Id | null }>;
+    const out: Target[] = [];
+    for (const r of rows) {
+      const caps = this.caps(r.id, actorId);
+      if (caps?.includes("write")) out.push({ id: r.id, kind: r.kind, title: r.title, realm: r.realm_id, parent: r.parent_id, capabilities: caps });
+    }
+    return out;
   }
 
   /** Events after my cursor (all actors, mine included) plus what is pending for me. */
@@ -650,7 +721,7 @@ export class Store {
   }
 
   isMember(contextId: string, actorId: string): boolean {
-    return !!this.db.prepare(`SELECT 1 FROM members WHERE context_id=? AND actor_id=?`).get(contextId, actorId);
+    return this.caps(contextId, actorId) !== undefined;
   }
 
   close() { this.db.close(); }

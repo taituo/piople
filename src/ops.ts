@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Store } from "./core/index.ts";
+import type { ContextKind, Store } from "./core/index.ts";
 
 /**
  * One operation table, two process-level faces: CLI (src/cli/main.ts) and MCP (src/mcp/server.ts).
@@ -46,9 +46,20 @@ export const OPS: Record<string, Op> = {
   },
   create: {
     mintsId: true,
-    description: "Create a case context; the caller joins with read,write,decide",
-    required: ["title"], optional: ["id", "goal"],
-    run: (s, as, a) => s.createContext({ id: a.id == null ? `case-${randomUUID().slice(0, 8)}` : str(a, "id"), kind: "case", title: str(a, "title"), goal: a.goal == null ? "" : str(a, "goal"), createdAt: Date.now() }, as),
+    description: "Create a context: a case (default), a channel (needs --realm) or a realm. The caller joins holding what it may in the realm. --parent puts a case under a channel",
+    required: ["title"], optional: ["id", "goal", "kind", "realm", "parent"],
+    run: (s, as, a) => {
+      const kind = (a.kind == null ? "case" : str(a, "kind")) as ContextKind;
+      return s.createContext({
+        id: a.id == null ? `${kind}-${randomUUID().slice(0, 8)}` : str(a, "id"), kind, title: str(a, "title"), goal: a.goal == null ? "" : str(a, "goal"), createdAt: Date.now(),
+        realmId: a.realm == null ? null : str(a, "realm"), parentId: a.parent == null ? null : str(a, "parent"),
+      }, as);
+    },
+  },
+  targets: {
+    description: "What I may address: realms, channels and cases I can write to, with my effective capabilities in each",
+    required: [],
+    run: (s, as) => s.targets(as),
   },
   join: {
     description: "Grant membership to another actor (caller needs decide, cannot grant more than it holds)",
