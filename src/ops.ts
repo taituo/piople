@@ -285,7 +285,7 @@ export function opDef(name: string): Op | undefined {
 // reader's terminal. No id needs one, so none is accepted.
 /** Ids are compared as strings: "ä" typed as one character and as a + combining dots look identical on screen but are two ids. */
 export const isNfc = (v: string) => v === v.normalize("NFC");
-const ACTOR_ID = /^(human|agent):[^\s\p{Cc}]{1,200}$/u;
+const ACTOR_ID = /^(human|agent):[^\s\p{Cc}\p{Cf}\p{Z}]{1,200}$/u;
 const ID_ARGS = ["context", "id", "decision", "artifact", "request", "key", "ingress", "submitted", "holder", "after-context", "parent", "realm"];
 const ACTOR_ARGS = ["actor", "to", "sender"];
 
@@ -310,7 +310,7 @@ export function runOp(s: Store, as: string, name: string, a: Args): unknown {
     const limit = ARG_LIMITS[k] ?? MAX_ARG_CHARS;
     if (size > limit) throw new Error(`too-large: ${k} is ${size} characters, the limit is ${limit}`);
   }
-  for (const k of ID_ARGS) if (typeof a[k] === "string" && /\p{Cc}/u.test(a[k] as string)) throw new Error(`bad-arg: ${k} contains a control character`);
+  for (const k of ID_ARGS) if (typeof a[k] === "string" && /[\p{Cc}\p{Cf}]|(?! )\p{Z}/u.test(a[k] as string)) throw new Error(`bad-arg: ${k} contains a control character (or an invisible or unusual space one)`);
   for (const k of ID_ARGS) if (typeof a[k] === "string" && !isNfc(a[k] as string)) throw new Error(`bad-arg: ${k} is not in Unicode normal form NFC (it would look the same as another id)`);
   const missing = op.required.filter((k) => a[k] == null || a[k] === "" || (typeof a[k] === "string" && a[k].trim() === ""));
   if (missing.length) throw new Error(`missing: ${missing.join(",")}`);

@@ -244,3 +244,15 @@ test("an id that is not in Unicode normal form is refused: it would look exactly
   await alice("create", { id: "ääkköset-ok", title: "t" }); // normal Finnish text is untouched
   store.close();
 });
+
+test("ids cannot hide characters: zero-width, direction overrides, soft hyphens and unusual spaces are refused", async () => {
+  const { alice, store } = world();
+  await alice("create", { id: "c1", title: "t" });
+  for (const ch of ["​", "‍", "‮", "⁠", "­", "﻿", " ", " "]) {
+    await assert.rejects(alice("join", { context: "c1", actor: `human:ali${ch}ce2`, caps: "read" }), /bad-actor/, `actor with U+${ch.codePointAt(0)!.toString(16)}`);
+    await assert.rejects(alice("create", { id: `c${ch}2`, title: "t" }), /bad-arg|bad-context/, `context with U+${ch.codePointAt(0)!.toString(16)}`);
+  }
+  assert.throws(() => store.createContext({ id: "c​3", kind: "case", title: "t", goal: "", createdAt: 1 }, "human:alice"), /bad-context/);
+  await alice("create", { id: "ääkköset 😀 ok", title: "t" }); // visible text, Finnish letters, emoji and an ordinary space stay fine
+  store.close();
+});

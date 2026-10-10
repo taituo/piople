@@ -322,7 +322,7 @@ export class Store {
   /** Where a new context sits, validated. A case under a channel lives in that channel's realm. */
   private placement(c: Context, by: Id): { realm: Id | null; parent: Id | null } {
     if (!CONTEXT_KINDS.includes(c.kind) || c.kind === "ingress") throw new Error(`bad-kind: ${c.kind} (case, channel or realm)`);
-    if (typeof c.id !== "string" || c.id.trim() === "" || c.id.length > 200 || /\p{Cc}/u.test(c.id) || c.id !== c.id.normalize("NFC")) throw new Error(`bad-context: an id is 1 to 200 characters, not blank and without control characters`);
+    if (typeof c.id !== "string" || c.id.trim() === "" || c.id.length > 200 || /[\p{Cc}\p{Cf}]|(?! )\p{Z}/u.test(c.id) || c.id !== c.id.normalize("NFC")) throw new Error(`bad-context: an id is 1 to 200 characters, not blank and without control characters`);
     if (c.id.startsWith(INGRESS_PREFIX)) throw new Error(`bad-context: ids starting with ${INGRESS_PREFIX} are reserved for ingress contexts`);
     let realm = c.realmId ?? null;
     const parent = c.parentId ?? null;
@@ -810,7 +810,7 @@ export class Store {
   // ---- routing: a submitted message waits in its sender's ingress until a router resolves it -----------------------
 
   addRouter(actorId: Id): void {
-    if (!/^(human|agent):\S+$/.test(actorId) || actorId !== actorId.normalize("NFC")) throw new Error(`bad-actor: ${actorId} (expected human:<name> or agent:<name>)`);
+    if (!/^(human|agent):[^\s\p{Cc}\p{Cf}\p{Z}]+$/u.test(actorId) || actorId !== actorId.normalize("NFC")) throw new Error(`bad-actor: ${actorId} (expected human:<name> or agent:<name>)`);
     this.tx(() => {
       this.db.prepare(`INSERT INTO actors(id,kind,name) VALUES(?,?,?) ON CONFLICT(id) DO NOTHING`).run(actorId, actorId.startsWith("human:") ? "human" : "agent", actorId);
       this.db.prepare(`INSERT INTO routers(actor_id,created_at) VALUES(?,?) ON CONFLICT(actor_id) DO NOTHING`).run(actorId, Date.now());
@@ -1085,7 +1085,7 @@ export class Store {
    * actors holds one token per actor, so it can speak only as the actors it was given.
    */
   issueToken(actorId: Id, ttlMs?: number, now = Date.now()): string {
-    if (!/^(human|agent):\S+$/.test(actorId) || actorId !== actorId.normalize("NFC")) throw new Error(`bad-actor: ${actorId} (expected human:<name> or agent:<name>)`);
+    if (!/^(human|agent):[^\s\p{Cc}\p{Cf}\p{Z}]+$/u.test(actorId) || actorId !== actorId.normalize("NFC")) throw new Error(`bad-actor: ${actorId} (expected human:<name> or agent:<name>)`);
     if (ttlMs !== undefined && !(Number.isInteger(ttlMs) && ttlMs > 0)) throw new Error(`bad-ttl: ${ttlMs} (positive whole milliseconds)`);
     const token = `pio_${randomBytes(32).toString("base64url")}`;
     this.tx(() => {
