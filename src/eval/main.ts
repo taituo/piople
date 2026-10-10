@@ -2,17 +2,19 @@ import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { jevClassifier } from "../harnesses/jev.ts";
 import { keywordClassifier } from "../harnesses/router.ts";
+import { consensusClassifier } from "../harnesses/consensus.ts";
 import { analyze, formatReport, runRoutingEval } from "./routing.ts";
 import type { EvalDataset } from "./routing.ts";
 
 /**
  * node src/eval/main.ts [--dataset eval/routing-synthetic.json] [--classifier keyword|jev]
- *                       [--target-precision 0.95] [--json] [--send-to-external]
+ *                       [--target-precision 0.95] [--json] [--send-to-external] [--consensus]
+ * --consensus asks jev twice with the destinations in opposite order and routes only when both agree.
  * jev needs OPENROUTER_API_KEY (or JEV_API_KEY), JEV_MODEL (exact id), optionally JEV_ENDPOINT, and
  * --send-to-external: evaluating shows the dataset's message texts and destination names to an outside service.
  */
 const { values } = parseArgs({
-  options: { dataset: { type: "string" }, classifier: { type: "string" }, "target-precision": { type: "string" }, json: { type: "boolean" }, "send-to-external": { type: "boolean" } },
+  options: { dataset: { type: "string" }, classifier: { type: "string" }, "target-precision": { type: "string" }, json: { type: "boolean" }, "send-to-external": { type: "boolean" }, consensus: { type: "boolean" } },
   strict: true,
 });
 const dataset = JSON.parse(readFileSync(values.dataset ?? "eval/routing-synthetic.json", "utf8")) as EvalDataset;
@@ -24,6 +26,7 @@ else if (which === "jev") {
   if (!apiKey || !process.env.JEV_MODEL) die("jev needs OPENROUTER_API_KEY (or JEV_API_KEY) and JEV_MODEL");
   if (!values["send-to-external"]) die("jev is an external service: pass --send-to-external to confirm the dataset may be shown to it");
   classifier = jevClassifier({ apiKey: apiKey!, model: process.env.JEV_MODEL!, endpoint: process.env.JEV_ENDPOINT });
+  if (values.consensus) classifier = consensusClassifier(classifier);
 } else die(`unknown classifier ${which} (keyword or jev)`);
 
 const run = await runRoutingEval(dataset, classifier!);
