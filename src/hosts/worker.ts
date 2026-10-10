@@ -27,7 +27,8 @@ export async function runWork(core: CoreClient, o: { actor: string; context: str
   }
   const { attempt, input } = claim.work;
   log(`claimed attempt ${attempt}`);
-  const exec = (o.executors ?? EXECUTORS)[o.skill];
+  const table = o.executors ?? EXECUTORS;
+  const exec = Object.hasOwn(table, o.skill) ? table[o.skill] : undefined; // "constructor" is not an executor
   try {
     if (!exec) throw new Error(`no executor for skill ${o.skill}`);
     const result = await exec(input, { context: o.context, workId: o.workId, attempt, idempotencyKey: `work:${o.workId}:${attempt}` });

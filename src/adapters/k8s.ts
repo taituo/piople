@@ -133,7 +133,9 @@ export class K8sLauncher implements Harness {
     for (const w of work) {
       const key = `${w.contextId}\0${w.id}`;
       live.add(key);
-      const profile = w.skill !== null && w.to === null ? this.o.profiles[w.skill] : undefined;
+      // Own keys only: a skill called "constructor" or "__proto__" must not find Object.prototype's members as a profile
+      // (the launch would fail and be retried at every look, for ever).
+      const profile = w.skill !== null && w.to === null && Object.hasOwn(this.o.profiles, w.skill) ? this.o.profiles[w.skill] : undefined;
       if (!profile || this.done.has(key)) continue;
       const seen = this.firstSeen.get(key) ?? now;
       this.firstSeen.set(key, seen);
