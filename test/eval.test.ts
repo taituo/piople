@@ -120,3 +120,11 @@ test("latency belongs to the right message even when two messages have the same 
   assert.ok(ms.s2! < 40, `erin's identical text is not charged for it (${ms.s2})`);
   assert.ok(ms.s3! < 40);
 });
+
+test("wilsonLower stays within 0..1 and refuses impossible counts", async () => {
+  const { wilsonLower } = await import("../src/eval/routing.ts");
+  assert.equal(wilsonLower(0, 5), 0, "no negative zero from rounding");
+  assert.equal(wilsonLower(0, 0), 0);
+  assert.ok(wilsonLower(5, 5) > 0.5 && wilsonLower(5, 5) <= 1);
+  for (const [k, n] of [[3, 2], [-1, 5], [1.5, 4], [Number.NaN, 4]] as const) assert.throws(() => wilsonLower(k, n), RangeError);
+});

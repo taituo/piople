@@ -95,10 +95,12 @@ export async function runRoutingEval(dataset: EvalDataset, classifier: Classifie
 
 /** Lower bound of the Wilson score interval for k successes in n trials (default 95%). */
 export function wilsonLower(k: number, n: number, z = 1.96): number {
+  if (!Number.isInteger(k) || !Number.isInteger(n) || k < 0 || n < 0 || k > n) throw new RangeError(`wilsonLower needs 0 <= k <= n, got ${k} of ${n}`);
   if (n === 0) return 0;
   const p = k / n;
   const d = 1 + (z * z) / n;
-  return (p + (z * z) / (2 * n) - z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n))) / d;
+  const lower = (p + (z * z) / (2 * n) - z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n))) / d;
+  return Math.min(1, Math.max(0, lower)); // rounding error must not print as -0%
 }
 
 export type ThresholdRow = { threshold: number; routed: number; correct: number; wrong: number; precision: number | null; coverage: number; falseRouteRate: number; routableRecall: number };
