@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { dirname } from "node:path";
-import type { Actor, Artifact, Context, ContextKind, Decision, EventType, Id, Membership, PiopleEvent, WorkItem } from "./types.ts";
+import type { Actor, Artifact, Context, ContextKind, Decision, EventType, Id, Membership, PiopleEvent, WorkItem, WorkStatus } from "./types.ts";
 import { CONTEXT_KINDS, EVENT_TYPES } from "./types.ts";
 
 const MIGRATIONS: string[] = [
@@ -640,6 +640,28 @@ export class Store {
       if (why) throw new Error(`work-not-claimable: ${workId} (${why})`);
       return this.doClaim(w, actorId, leaseMs, now);
     });
+  }
+
+  /**
+   * Work in the contexts I may read (one context, or all of them), oldest first. Reading is all it takes: this is how
+   * something that must see work without being able to take it (a launcher) finds it. `claimable` = open, or claimed
+   * with an expired lease.
+   */
+  listWork(actorId: Id, o: { context?: Id; status?: WorkStatus | "claimable"; limit?: number } = {}, now = Date.now()): WorkItem[] {
+    const limit = Math.min(Math.max(Math.trunc(o.limit ?? 200), 1), 1000);
+    if (o.status !== undefined && !["open", "claimed", "done", "failed", "claimable"].includes(o.status)) throw new Error(`bad-status: ${o.status}`);
+    if (o.context !== undefined) this.mustMember(o.context, actorId, "read");
+    const contexts = o.context !== undefined ? [o.context] : this.inbox(actorId).map((c) => c.context);
+    const out: WorkItem[] = [];
+    for (const c of contexts) {
+      const rows = this.db.prepare(`SELECT * FROM work WHERE context_id=? ORDER BY created_at, rowid`).all(c) as WorkRow[];
+      for (const r of rows) {
+        const w = this.workItem(r);
+        const claimable = w.status === "open" || (w.status === "claimed" && w.leaseUntil !== null && w.leaseUntil < now);
+        if (o.status === undefined || (o.status === "claimable" ? claimable : w.status === o.status)) out.push(w);
+      }
+    }
+    return out.sort((a, b) => a.createdAt - b.createdAt).slice(0, limit);
   }
 
   /** Claim the oldest work I may take, or null. */

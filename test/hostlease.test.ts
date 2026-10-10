@@ -107,3 +107,21 @@ test("HTTP: host-lease and fencing travel as ordinary ops; already-hosted is a 4
   await new Promise<void>((r) => { srv.closeAllConnections(); srv.close(() => r()); });
   s.close();
 });
+
+test("Host: a harness that reads its own inbox in step or poll is not fenced out by its own lease", async () => {
+  const s = world();
+  runOp(s, "human:alice", "post", { context: "c1", text: "hi" });
+  const seen: unknown[] = [];
+  const host = new Host(new LocalCore(s));
+  await host.add({
+    actor: "agent:w",
+    harness: {
+      async step(st) { seen.push(await st.run("inbox", { context: "c1", limit: 1 })); },
+      async poll(api) { seen.push(await api.run("inbox")); return 0; },
+    },
+  });
+  await host.settle();
+  assert.ok(seen.length >= 2, "both the step and the poll got an answer");
+  await host.close();
+  s.close();
+});

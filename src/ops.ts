@@ -118,6 +118,11 @@ export const OPS: Record<string, Op> = {
       return s.requestWork(str(a, "context"), as, { id, to: a.to == null ? null : str(a, "to"), skill: a.skill == null ? null : str(a, "skill"), input: json(a.input) });
     },
   },
+  "work-list": {
+    description: "Work in the contexts I may read (all, or --context), oldest first; --status open|claimed|done|failed|claimable. Reading is enough: it shows work, it does not let me take it",
+    required: [], optional: ["context", "status", "limit"],
+    run: (s, as, a) => s.listWork(as, { ...(a.context == null ? {} : { context: str(a, "context") }), ...(a.status == null ? {} : { status: str(a, "status") as never }), ...(a.limit == null ? {} : { limit: Number(a.limit) }) }),
+  },
   "work-claim": {
     description: "Atomically claim work: --id <work> or --next for the oldest I may take. Returns the attempt number; pass work:<id>:<attempt> on as your idempotency key",
     required: ["context"], optional: ["id", "next", "lease-ms"],

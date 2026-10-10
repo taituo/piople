@@ -41,6 +41,11 @@ export class Host {
     this.leaseMs = opts.leaseMs ?? 30_000;
   }
 
+  /** A call a harness makes as its actor. The two calls that consume the inbox carry this host's holder, so a harness that reads its own inbox is not fenced out by its own lease. */
+  private call(actor: string, op: string, args: Args): Promise<unknown> {
+    return this.core.call(actor, op, op === "inbox" || op === "ack" ? { holder: this.holder, ...args } : args);
+  }
+
   /** Take or renew the lease on an actor's inbox. Another live host for the same actor makes this throw `already-hosted`. */
   private async lease(e: Entry): Promise<void> {
     const l = (await this.core.call(e.actor, "host-lease", { holder: this.holder, "ttl-ms": this.leaseMs })) as { expiresAt: number };
@@ -104,7 +109,7 @@ export class Host {
     if (e.harness.poll) {
       steps++; // an attempt, so a failing poll is retried by settle() instead of looking idle
       try {
-        steps += await e.harness.poll({ actor, run: (op, args = {}) => this.core.call(actor, op, args) as never });
+        steps += await e.harness.poll({ actor, run: (op, args = {}) => this.call(actor, op, args) as never });
         steps--; // handled items replace the attempt; an idle poll is not a delivery
       } catch (error) {
         e.failures++;
@@ -199,7 +204,7 @@ export class Host {
         if (def?.required.includes("context") || def?.optional?.includes("context")) a.context ??= d.context;
         if (def?.optional?.includes("key")) a.key ??= stable;
         else if (def?.mintsId) a.id ??= stable.replace(/[^\w.-]/g, "-");
-        return (await this.core.call(actor, op, a)) as never;
+        return (await this.call(actor, op, a)) as never;
       },
     };
   }
