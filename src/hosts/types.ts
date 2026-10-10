@@ -1,13 +1,7 @@
 import type { InboxDetail, Pending } from "../core/index.ts";
 import type { Args } from "../ops.ts";
 
-/**
- * How a host talks to Core. In-process today (LocalCore); an HTTP client in phase D.
- * Everything a harness does goes through this, as its own actor.
- */
-export interface CoreClient {
-  call(as: string, op: string, args?: Args): Promise<unknown>;
-}
+export type { CoreClient } from "../ops.ts";
 
 /** One delivery to a harness: what is new in one context, and what is owed. */
 export type Step = {

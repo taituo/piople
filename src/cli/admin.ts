@@ -19,6 +19,10 @@ if (!values.actor || (cmd !== "issue-token" && cmd !== "revoke-tokens" && cmd !=
   process.stderr.write("usage: admin [--db path] (issue-token [--ttl-ms N] | revoke-tokens | list-tokens) --actor <human:x|agent:x>\n");
   process.exit(2);
 }
+if (values["ttl-ms"] !== undefined && cmd !== "issue-token") {
+  process.stderr.write("error: --ttl-ms only applies to issue-token\n");
+  process.exit(2);
+}
 const store = new Store(values.db ?? process.env.PIO_DATA ?? "./data/piople.sqlite");
 try {
   const ttl = values["ttl-ms"] === undefined ? undefined : Number(values["ttl-ms"]);

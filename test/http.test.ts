@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import http from "node:http";
 import net from "node:net";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { mkdtempSync } from "node:fs";
@@ -264,8 +265,8 @@ test("tokens expire, record last use at most once a minute, and can be listed wi
   assert.equal(store.actorForToken(forever, t0 + 10 ** 9), "agent:a", "no ttl, no expiry");
   const listed = JSON.stringify(store.listTokens("agent:a"));
   assert.ok(!listed.includes(short) && !listed.includes(forever), "the secret never leaves");
-  store.revokeTokens("agent:a");
-  assert.ok(store.listTokens("agent:a").every((t) => t.revokedAt !== null));
+  assert.equal(store.revokeTokens("agent:a", t0 + 10_000), 1, "only the live token counts; the expired one is left alone");
+  assert.deepEqual(store.listTokens("agent:a").map((t) => t.revokedAt !== null), [false, true]);
   store.close();
 });
 
@@ -279,6 +280,8 @@ test("admin CLI: --ttl-ms and list-tokens", () => {
   assert.equal(listed.tokens[0]!.expiresAt - listed.tokens[0]!.createdAt, 60_000);
   assert.ok(!JSON.stringify(listed).includes(token));
   assert.throws(() => admin("issue-token", "--actor", "agent:x", "--ttl-ms", "soon"), /bad-ttl/);
+  assert.throws(() => admin("revoke-tokens", "--actor", "agent:x", "--ttl-ms", "1000"), /only applies to issue-token/);
+  assert.equal(JSON.parse(admin("list-tokens", "--actor", "agent:x")).tokens[0].revokedAt, null, "the refused command revoked nothing");
 });
 
 test("reads are bounded and leases must be sensible", () => {
@@ -353,4 +356,33 @@ test("remote MCP: an agent on another machine uses the same tools over HTTP, ide
 
   server.kill("SIGTERM");
   await exited(server);
+});
+
+test("remote MCP: a stuck tool call does not stop initialize and tools/list from being answered", async () => {
+  // A "core" that vouches for the token but never answers an op.
+  const stuck = http.createServer((req, res) => {
+    if (req.url === "/v1/whoami") { res.writeHead(200, { "content-type": "application/json" }); res.end('{"actor":"agent:scout"}'); }
+    // anything else: hold the connection open
+  });
+  await new Promise<void>((r) => stuck.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${(stuck.address() as net.AddressInfo).port}`;
+  const p = spawn(process.execPath, ["--no-warnings", "src/mcp/server.ts"], { env: { PATH: process.env.PATH!, PIO_CORE_URL: url, PIO_TOKEN: "pio_x" }, stdio: ["pipe", "pipe", "inherit"] });
+  const seen: number[] = [];
+  let buf = "";
+  p.stdout!.on("data", (d: Buffer) => {
+    buf += d.toString();
+    const lines = buf.split("\n");
+    buf = lines.pop() ?? "";
+    for (const l of lines) if (l.trim()) seen.push(JSON.parse(l).id);
+  });
+  p.stdin!.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "piople_inbox", arguments: {} } }) + "\n");
+  p.stdin!.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "initialize", params: {} }) + "\n");
+  p.stdin!.write(JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/list" }) + "\n");
+  const deadline = Date.now() + 3_000;
+  while (seen.length < 2 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual([...seen].sort(), [2, 3], "initialize and tools/list answered while the call is still stuck");
+  p.kill("SIGKILL");
+  await new Promise((r) => p.on("close", r));
+  stuck.closeAllConnections();
+  await new Promise((r) => stuck.close(r));
 });

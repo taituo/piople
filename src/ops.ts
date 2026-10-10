@@ -7,6 +7,11 @@ import type { Store } from "./core/index.ts";
  * Every op goes through Store, so membership/capability rules are identical everywhere.
  */
 export type Args = Record<string, unknown>;
+
+/** How anything that is not Core itself talks to it: in-process (LocalCore) or over HTTP (HttpCore). */
+export interface CoreClient {
+  call(as: string, op: string, args?: Args): Promise<unknown>;
+}
 type Op = {
   description: string;
   required: string[];

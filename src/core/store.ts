@@ -123,6 +123,9 @@ type Mutation = {
 
 /** One read never returns more than this many events; page with the cursor. */
 export const MAX_READ = 1000;
+const checkLease = (leaseMs: number | undefined) => {
+  if (leaseMs !== undefined && !(Number.isInteger(leaseMs) && leaseMs > 0)) throw new Error(`bad-lease: ${leaseMs} (positive whole milliseconds)`);
+};
 const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
 
 export class Store {
@@ -450,6 +453,7 @@ export class Store {
    * outside, so executors should pass `work:<id>:<attempt>` on as their own idempotency key.
    */
   claimWork(contextId: Id, actorId: Id, workId: Id, leaseMs?: number, now = Date.now()): { event: PiopleEvent; work: WorkItem } {
+    checkLease(leaseMs);
     return this.tx(() => {
       this.mustMember(contextId, actorId, "write");
       const w = this.getWork(contextId, workId);
@@ -465,6 +469,7 @@ export class Store {
 
   /** Claim the oldest work I may take, or null. */
   claimNext(contextId: Id, actorId: Id, leaseMs?: number, now = Date.now()): { event: PiopleEvent; work: WorkItem } | null {
+    checkLease(leaseMs);
     return this.tx(() => {
       this.mustMember(contextId, actorId, "write");
       const w = this.claimableWork(contextId, now).find((x) => this.cannotClaim(x, actorId, now) === null);
@@ -473,7 +478,6 @@ export class Store {
   }
 
   private doClaim(w: WorkItem, actorId: Id, leaseMs: number | undefined, now: number): { event: PiopleEvent; work: WorkItem } {
-    if (leaseMs !== undefined && !(Number.isInteger(leaseMs) && leaseMs > 0)) throw new Error(`bad-lease: ${leaseMs} (positive whole milliseconds)`);
     const attempt = w.attempt + 1;
     const leaseUntil = leaseMs === undefined ? null : now + leaseMs;
     const event = this.mutate({
@@ -612,7 +616,13 @@ export class Store {
     const hash = hashToken(token);
     const r = this.db.prepare(`SELECT actor_id, last_used_at FROM tokens WHERE hash=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)`).get(hash, now) as { actor_id: string; last_used_at: number | null } | undefined;
     if (!r) return undefined;
-    if (r.last_used_at === null || now - r.last_used_at >= 60_000) this.db.prepare(`UPDATE tokens SET last_used_at=? WHERE hash=?`).run(now, hash);
+    if (r.last_used_at === null || now - r.last_used_at >= 60_000) {
+      try {
+        this.db.prepare(`UPDATE tokens SET last_used_at=? WHERE hash=?`).run(now, hash);
+      } catch {
+        // Last-use is bookkeeping: a busy or read-only database must not turn a valid token into a thrown error.
+      }
+    }
     return r.actor_id;
   }
 
@@ -622,9 +632,9 @@ export class Store {
       .map((t) => ({ createdAt: t.created_at, expiresAt: t.expires_at, lastUsedAt: t.last_used_at, revokedAt: t.revoked_at }));
   }
 
-  /** Revoke every live token of an actor. Returns how many. */
-  revokeTokens(actorId: Id): number {
-    return Number(this.db.prepare(`UPDATE tokens SET revoked_at=? WHERE actor_id=? AND revoked_at IS NULL`).run(Date.now(), actorId).changes);
+  /** Revoke every live (not revoked, not expired) token of an actor. Returns how many. */
+  revokeTokens(actorId: Id, now = Date.now()): number {
+    return Number(this.db.prepare(`UPDATE tokens SET revoked_at=? WHERE actor_id=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)`).run(now, actorId, now).changes);
   }
 
   /** Unchecked read, for internal and test use. Actors go through readEvents. */

@@ -19,7 +19,7 @@ let call: (op: string, args: Args) => Promise<unknown>;
 if (remoteUrl) {
   const token = process.env.PIO_TOKEN;
   if (!token) die("PIO_CORE_URL needs PIO_TOKEN");
-  const res = await fetch(`${remoteUrl.replace(/\/+$/, "")}/v1/whoami`, { headers: { authorization: `Bearer ${token}` } }).catch((e: Error) => die(`cannot reach ${remoteUrl}: ${e.message}`));
+  const res = await fetch(`${remoteUrl.replace(/\/+$/, "")}/v1/whoami`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10_000) }).catch((e: Error) => die(`cannot reach ${remoteUrl}: ${e.message}`));
   if (!res.ok) die(`${remoteUrl} refused the token (HTTP ${res.status})`);
   const who = ((await res.json()) as { actor: string }).actor;
   if (process.env.PIO_ACTOR && process.env.PIO_ACTOR !== who) die(`PIO_ACTOR=${process.env.PIO_ACTOR} but the token belongs to ${who}`);
@@ -74,7 +74,8 @@ async function handle(req: Req) {
   return err(req.id, -32601, `unknown method: ${req.method}`);
 }
 
-// Requests are answered in the order they arrive, also when a call goes over the network.
+// Tool calls run one after another (a call over the network can be slow); everything else is
+// answered at once, so one slow call never makes the server look dead to its client.
 let queue: Promise<void> = Promise.resolve();
 let buf = "";
 process.stdin.on("data", (d: Buffer) => {
@@ -83,13 +84,15 @@ process.stdin.on("data", (d: Buffer) => {
   buf = lines.pop() ?? "";
   for (const line of lines) {
     if (!line.trim()) continue;
-    queue = queue.then(async () => {
-      try {
-        await handle(JSON.parse(line) as Req);
-      } catch {
-        err(null, -32700, "parse error");
-      }
-    });
+    let req: Req;
+    try {
+      req = JSON.parse(line) as Req;
+    } catch {
+      err(null, -32700, "parse error");
+      continue;
+    }
+    if (req.method === "tools/call") queue = queue.then(async () => { await handle(req); });
+    else void handle(req);
   }
 });
 process.stdin.on("end", () => void queue.then(() => store?.close()));

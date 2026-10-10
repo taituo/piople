@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { OPS, RANDOM_KEY_OPS, type Args } from "../ops.ts";
+import { OPS, RANDOM_KEY_OPS, type Args, type CoreClient } from "../ops.ts";
 
 export class CoreError extends Error {
   status: number;
@@ -23,13 +23,13 @@ export type HttpCoreOptions = {
 };
 
 /**
- * A CoreClient (src/hosts/types.ts, structurally) over HTTP. One token per actor: `call(as, ...)` speaks as exactly the actors it was
+ * A CoreClient over HTTP. One token per actor: `call(as, ...)` speaks as exactly the actors it was
  * given tokens for. Retries are safe because the client fixes an idempotency key (or id) before the
  * first attempt, so a lost response replays on the server instead of duplicating. The one op that
  * cannot be retried blindly, `work-claim --next`, is not: a lost answer leaves the claim visible in
  * the inbox under `work.mine`, where the host resumes it.
  */
-export class HttpCore {
+export class HttpCore implements CoreClient {
   private readonly base: string;
   private readonly tokens: Map<string, string>;
   private readonly o: Required<Omit<HttpCoreOptions, "fetch">> & { fetch: typeof fetch };
