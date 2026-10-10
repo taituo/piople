@@ -51,7 +51,8 @@ test("mcp: same store, identity from env, refusals are tool errors", async () =>
   p.stdin.end();
   await new Promise((r) => p.on("close", r));
   assert.deepEqual(replies.map((r) => r.id), [1, 2, 3, 4]);
-  assert.ok((replies[1]!.result!.tools as unknown[]).length >= 10);
+  const names = (replies[1]!.result!.tools as Array<{ name: string }>).map((x) => x.name);
+  for (const n of ["piople_inbox", "piople_ack", "piople_work_request", "piople_work_claim", "piople_work_complete", "piople_work_fail"]) assert.ok(names.includes(n), `missing tool ${n}`);
   assert.equal(replies[2]!.result!.isError, undefined);
   assert.equal(replies[3]!.result!.isError, true);
   assert.match(replies[3]!.result!.content![0]!.text, /lacks decide/);
@@ -90,4 +91,58 @@ test("cli: inbox shows what happened while away; ack persists across processes",
   assert.deepEqual(run("human:alice", "ack", "--context", "c1", "--seq", String(detail.events.at(-1).seq)), { cursor: detail.events.at(-1).seq });
   assert.deepEqual(run("human:alice", "inbox", "--context", "c1").events, []);
   assert.equal(run("human:alice", "inbox")[0].pending, 1);
+});
+
+function runAsync(dbPath: string, as: string, ...args: string[]): Promise<{ code: number | null; out: string; err: string }> {
+  return new Promise((resolve) => {
+    const p = spawn(process.execPath, ["--no-warnings", "src/cli/main.ts", "--db", dbPath, "--as", as, ...args], { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "", err = "";
+    p.stdout.on("data", (d: Buffer) => (out += d));
+    p.stderr.on("data", (d: Buffer) => (err += d));
+    p.on("close", (code) => resolve({ code, out, err }));
+  });
+}
+
+test("work: 8 competing processes, 3 work items — each item has exactly one winner", async () => {
+  const dbw = join(mkdtempSync(join(tmpdir(), "piople-")), "w.sqlite");
+  assert.equal((await runAsync(dbw, "human:alice", "create", "--id", "c1", "--title", "t")).code, 0);
+  const workers = Array.from({ length: 8 }, (_, i) => `agent:w${i}`);
+  for (const w of workers) {
+    assert.equal((await runAsync(dbw, w, "actor", "--skills", "web.search")).code, 0);
+    assert.equal((await runAsync(dbw, "human:alice", "join", "--context", "c1", "--actor", w, "--caps", "read,write")).code, 0);
+  }
+  for (const id of ["w1", "w2", "w3"]) {
+    assert.equal((await runAsync(dbw, "human:alice", "work-request", "--context", "c1", "--id", id, "--skill", "web.search", "--input", `{"q":"${id}"}`)).code, 0);
+  }
+
+  const results = await Promise.all(workers.map((w) => runAsync(dbw, w, "work-claim", "--context", "c1", "--next", "true")));
+  assert.deepEqual(results.filter((r) => r.code !== 0), [], "losing a race is a normal answer, not an error");
+  const parsed = results.map((r) => JSON.parse(r.out) as { work: { id: string; attempt: number } | null });
+  const won = parsed.filter((r) => r.work).map((r) => r.work!.id).sort();
+  assert.deepEqual(won, ["w1", "w2", "w3"]);
+  assert.equal(parsed.filter((r) => !r.work).length, 5);
+
+  const events = JSON.parse((await runAsync(dbw, "human:alice", "events", "--context", "c1")).out) as Array<{ type: string; actorId: string; data: { workId?: string } }>;
+  assert.equal(events.filter((e) => e.type === "work.claimed").length, 3, "exactly three claim events in the log");
+});
+
+test("work: a replaced claimant is refused over the CLI; the replacement finishes", async () => {
+  const dbw = join(mkdtempSync(join(tmpdir(), "piople-")), "s.sqlite");
+  const run = (as: string, ...a: string[]) => runAsync(dbw, as, ...a);
+  await run("human:alice", "create", "--id", "c1", "--title", "t");
+  for (const w of ["agent:a", "agent:b"]) {
+    await run(w, "actor", "--skills", "x");
+    await run("human:alice", "join", "--context", "c1", "--actor", w, "--caps", "read,write");
+  }
+  await run("human:alice", "work-request", "--context", "c1", "--id", "w1", "--skill", "x", "--input", "go");
+  const a = JSON.parse((await run("agent:a", "work-claim", "--context", "c1", "--id", "w1", "--lease-ms", "1")).out) as { work: { attempt: number } };
+  await new Promise((r) => setTimeout(r, 30));
+  const b = JSON.parse((await run("agent:b", "work-claim", "--context", "c1", "--id", "w1")).out) as { work: { attempt: number } };
+  assert.deepEqual([a.work.attempt, b.work.attempt], [1, 2]);
+  const late = await run("agent:a", "work-complete", "--context", "c1", "--id", "w1", "--attempt", "1", "--result", "late");
+  assert.equal(late.code, 1);
+  assert.match(late.err, /stale-claim/);
+  assert.equal((await run("agent:b", "work-complete", "--context", "c1", "--id", "w1", "--attempt", "2", "--result", '{"ok":true}')).code, 0);
+  const pending = JSON.parse((await run("agent:b", "inbox", "--context", "c1")).out) as { pending: { work: { open: unknown[]; mine: unknown[] } } };
+  assert.deepEqual(pending.pending.work, { open: [], mine: [] });
 });

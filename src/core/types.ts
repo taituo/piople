@@ -39,6 +39,10 @@ export const EVENT_TYPES = [
   "action.executed",
   "presence.changed",
   "observation.promoted",
+  "work.requested",
+  "work.claimed",
+  "work.completed",
+  "work.failed",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
@@ -86,5 +90,28 @@ export type Presence = {
   state: PresenceState;
   /** echo: away human whose delegate may answer questions, but never decide. */
   echo: boolean;
+  updatedAt: number;
+};
+
+export type WorkStatus = "open" | "claimed" | "done" | "failed";
+/**
+ * A unit of requested work. `to` and `skill` only route it: claiming still needs
+ * membership with write, and skills are self-declared hints, never permissions.
+ */
+export type WorkItem = {
+  id: Id;
+  contextId: Id;
+  requestedBy: Id;
+  to: Id | null;
+  skill: string | null;
+  input: unknown;
+  status: WorkStatus;
+  claimedBy: Id | null;
+  /** Counts claims. Completion must present the attempt it was given, so a replaced claimant is refused. */
+  attempt: number;
+  /** null while claimed = no expiry; the host chooses whether and how long to lease. */
+  leaseUntil: number | null;
+  result: unknown;
+  createdAt: number;
   updatedAt: number;
 };

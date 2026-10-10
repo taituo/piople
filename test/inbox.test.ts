@@ -39,7 +39,7 @@ test("away human returns: unread and pending are derived; ack moves the cursor b
   s.answerAssistance("c1", "human:alice", "a1", "q1", "yes, staging", []);
   s.resolveDecision("c1", "human:alice", "k", "d1", "yes");
   const done = s.inboxOf("c1", "human:alice");
-  assert.deepEqual(done.pending, { assistance: [], decisions: [] });
+  assert.deepEqual(done.pending, { assistance: [], decisions: [], work: { open: [], mine: [] } });
   assert.equal(done.events.length, 2, "only the two events after the cursor, both mine");
   assert.equal(s.inbox("human:alice")[0]!.unread, 0, "own events are never unread");
   s.close();

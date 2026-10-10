@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
-import type { Actor, Artifact, Context, Decision, EventType, Id, Membership, PiopleEvent } from "./types.ts";
+import type { Actor, Artifact, Context, Decision, EventType, Id, Membership, PiopleEvent, WorkItem } from "./types.ts";
 import { EVENT_TYPES } from "./types.ts";
 
 const MIGRATIONS: string[] = [
@@ -61,6 +61,17 @@ CREATE TABLE cursors (
   acked_seq INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
   PRIMARY KEY (context_id, actor_id));
 `,
+  // Migration 6: self-declared skills (routing hints) and the work table.
+  `
+ALTER TABLE actors ADD COLUMN skills TEXT NOT NULL DEFAULT '[]';
+CREATE TABLE work (
+  context_id TEXT NOT NULL REFERENCES contexts(id), id TEXT NOT NULL,
+  requested_by TEXT NOT NULL, to_actor TEXT, skill TEXT, input TEXT NOT NULL,
+  status TEXT NOT NULL, claimed_by TEXT, attempt INTEGER NOT NULL DEFAULT 0,
+  lease_until INTEGER, result TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  PRIMARY KEY (context_id, id));
+CREATE INDEX work_status ON work(context_id, status);
+`,
 ];
 
 export type InboxSummary = { context: Id; title: string; cursor: number; unread: number; pending: number };
@@ -69,9 +80,20 @@ export type Pending = {
   assistance: Array<{ key: string; from: Id; question: string; seq: number }>;
   /** open decisions I may resolve (needs decide, and not an echo delegate) */
   decisions: Array<{ id: Id; question: string; options: string[]; requestedBy: Id }>;
+  work: {
+    /** claimable by me right now: addressed to me or to a skill I declared, open or lease expired */
+    open: Array<{ id: Id; from: Id; skill: string | null; to: Id | null; input: unknown }>;
+    /** claimed by me and not finished (resume these after a restart) */
+    mine: Array<{ id: Id; attempt: number; leaseUntil: number | null; input: unknown }>;
+  };
 };
 export type InboxDetail = { context: Id; cursor: number; events: PiopleEvent[]; pending: Pending };
 
+type WorkRow = {
+  context_id: string; id: string; requested_by: string; to_actor: string | null; skill: string | null; input: string;
+  status: string; claimed_by: string | null; attempt: number; lease_until: number | null; result: string | null;
+  created_at: number; updated_at: number;
+};
 type Row = { seq: number; ts: number; type: string; context_id: string; actor_id: string; key: string; data: string };
 type Mutation = {
   type: EventType;
@@ -81,6 +103,8 @@ type Mutation = {
   key: string;
   /** Permission/precondition checks. Runs first, inside the transaction, also on replays. */
   check?: () => void;
+  /** Look up the key before checking: a caller replaying its own earlier event gets it back even if state has moved on. */
+  replayFirst?: boolean;
   /** Side-table writes; returns the event data. Skipped when the key was already used. */
   write?: () => Record<string, unknown>;
 };
@@ -132,14 +156,20 @@ export class Store {
    */
   private mutate(m: Mutation): PiopleEvent {
     return this.tx(() => {
-      m.check?.();
-      const existing = this.db.prepare(`SELECT seq, ts, type, context_id, actor_id, key, data FROM events WHERE context_id=? AND key=?`).get(m.contextId, m.key) as Row | undefined;
-      if (existing) {
-        if (existing.type !== m.type || existing.actor_id !== m.actorId) {
+      const lookup = () => {
+        const existing = this.db.prepare(`SELECT seq, ts, type, context_id, actor_id, key, data FROM events WHERE context_id=? AND key=?`).get(m.contextId, m.key) as Row | undefined;
+        if (existing && (existing.type !== m.type || existing.actor_id !== m.actorId)) {
           throw new Error(`key-conflict: ${m.key} in ${m.contextId} already used by ${existing.actor_id} for ${existing.type}`);
         }
-        return this.row(existing);
+        return existing;
+      };
+      if (m.replayFirst) {
+        const hit = lookup();
+        if (hit) return this.row(hit);
       }
+      m.check?.();
+      const existing = lookup();
+      if (existing) return this.row(existing);
       const data = m.write?.() ?? {};
       const info = this.db.prepare(`INSERT INTO events(ts,type,context_id,actor_id,key,data) VALUES(?,?,?,?,?,?)`).run(Date.now(), m.type, m.contextId, m.actorId, m.key, JSON.stringify(data));
       const row = this.db.prepare(`SELECT seq, ts, type, context_id, actor_id, key, data FROM events WHERE seq=?`).get(info.lastInsertRowid) as Row;
@@ -342,6 +372,146 @@ export class Store {
     });
   }
 
+  /** Skills are self-declared routing hints. They never grant anything. */
+  setSkills(actorId: Id, skills: string[]): void {
+    const info = this.db.prepare(`UPDATE actors SET skills=? WHERE id=?`).run(JSON.stringify([...new Set(skills)].sort()), actorId);
+    if (info.changes !== 1) throw new Error(`unknown-actor: ${actorId}`);
+  }
+
+  private skillsOf(actorId: Id): string[] {
+    const r = this.db.prepare(`SELECT skills FROM actors WHERE id=?`).get(actorId) as { skills: string } | undefined;
+    return r ? (JSON.parse(r.skills) as string[]) : [];
+  }
+
+  private workItem(r: WorkRow): WorkItem {
+    return {
+      id: r.id, contextId: r.context_id, requestedBy: r.requested_by, to: r.to_actor, skill: r.skill, input: JSON.parse(r.input),
+      status: r.status as WorkItem["status"], claimedBy: r.claimed_by, attempt: r.attempt, leaseUntil: r.lease_until,
+      result: r.result === null ? null : JSON.parse(r.result), createdAt: r.created_at, updatedAt: r.updated_at,
+    };
+  }
+
+  getWork(contextId: Id, workId: Id): WorkItem | undefined {
+    const r = this.db.prepare(`SELECT * FROM work WHERE context_id=? AND id=?`).get(contextId, workId) as WorkRow | undefined;
+    return r ? this.workItem(r) : undefined;
+  }
+
+  /** Work nobody currently holds: open, or claimed with an expired lease. Oldest first. */
+  private claimableWork(contextId: Id, now: number): WorkItem[] {
+    return (this.db.prepare(`SELECT * FROM work WHERE context_id=? AND (status='open' OR (status='claimed' AND lease_until IS NOT NULL AND lease_until<?)) ORDER BY rowid`).all(contextId, now) as WorkRow[]).map((r) => this.workItem(r));
+  }
+
+  /** Why this actor may not take this work right now, or null. */
+  private cannotClaim(w: WorkItem, actorId: Id, now: number): string | null {
+    if (w.to !== null && w.to !== actorId) return `directed to ${w.to}`;
+    if (w.skill !== null && !this.skillsOf(actorId).includes(w.skill)) return `needs skill ${w.skill}`;
+    if (w.status === "open") return null;
+    if (w.status === "claimed" && w.leaseUntil !== null && w.leaseUntil < now) return null;
+    return `already ${w.status}${w.claimedBy ? ` by ${w.claimedBy}` : ""}`;
+  }
+
+  requestWork(contextId: Id, actorId: Id, w: { id: Id; to?: Id | null; skill?: string | null; input: unknown }): PiopleEvent {
+    return this.mutate({
+      type: "work.requested", contextId, actorId, key: `work:${w.id}`,
+      check: () => {
+        this.mustMember(contextId, actorId, "write");
+        if (!w.to && !w.skill) throw new Error(`work-needs-target: give --to or --skill`);
+      },
+      write: () => {
+        const now = Date.now();
+        this.db.prepare(`INSERT INTO work(context_id,id,requested_by,to_actor,skill,input,status,attempt,created_at,updated_at) VALUES(?,?,?,?,?,?,'open',0,?,?)`).run(
+          contextId, w.id, actorId, w.to ?? null, w.skill ?? null, JSON.stringify(w.input ?? null), now, now,
+        );
+        return { workId: w.id, to: w.to ?? null, skill: w.skill ?? null, input: w.input ?? null };
+      },
+    });
+  }
+
+  /**
+   * Atomic claim. One holder at a time; a reclaim after lease expiry bumps `attempt`.
+   * The same holder claiming again while its claim is live gets that claim back (restart-safe).
+   * Core guarantees one holder and one accepted completion per attempt; it cannot undo side effects
+   * outside, so executors should pass `work:<id>:<attempt>` on as their own idempotency key.
+   */
+  claimWork(contextId: Id, actorId: Id, workId: Id, leaseMs?: number, now = Date.now()): { event: PiopleEvent; work: WorkItem } {
+    return this.tx(() => {
+      this.mustMember(contextId, actorId, "write");
+      const w = this.getWork(contextId, workId);
+      if (!w) throw new Error(`unknown-work: ${workId}`);
+      if (w.status === "claimed" && w.claimedBy === actorId && (w.leaseUntil === null || w.leaseUntil >= now)) {
+        return { event: this.mutate({ type: "work.claimed", contextId, actorId, key: `claim:${workId}:${w.attempt}` }), work: w };
+      }
+      const why = this.cannotClaim(w, actorId, now);
+      if (why) throw new Error(`work-not-claimable: ${workId} (${why})`);
+      return this.doClaim(w, actorId, leaseMs, now);
+    });
+  }
+
+  /** Claim the oldest work I may take, or null. */
+  claimNext(contextId: Id, actorId: Id, leaseMs?: number, now = Date.now()): { event: PiopleEvent; work: WorkItem } | null {
+    return this.tx(() => {
+      this.mustMember(contextId, actorId, "write");
+      const w = this.claimableWork(contextId, now).find((x) => this.cannotClaim(x, actorId, now) === null);
+      return w ? this.doClaim(w, actorId, leaseMs, now) : null;
+    });
+  }
+
+  private doClaim(w: WorkItem, actorId: Id, leaseMs: number | undefined, now: number): { event: PiopleEvent; work: WorkItem } {
+    const attempt = w.attempt + 1;
+    const leaseUntil = leaseMs === undefined ? null : now + leaseMs;
+    const event = this.mutate({
+      type: "work.claimed", contextId: w.contextId, actorId, key: `claim:${w.id}:${attempt}`,
+      write: () => {
+        const info = this.db.prepare(`UPDATE work SET status='claimed', claimed_by=?, attempt=?, lease_until=?, updated_at=?
+          WHERE context_id=? AND id=? AND attempt=? AND (status='open' OR (status='claimed' AND lease_until IS NOT NULL AND lease_until<?))`).run(
+          actorId, attempt, leaseUntil, now, w.contextId, w.id, w.attempt, now,
+        );
+        if (info.changes !== 1) throw new Error(`work-not-claimable: ${w.id} (lost race)`);
+        return { workId: w.id, attempt, leaseUntil };
+      },
+    });
+    return { event, work: this.getWork(w.contextId, w.id)! };
+  }
+
+  /** Only the current holder of the current attempt may finish. A late finisher from an older attempt is refused. */
+  completeWork(contextId: Id, actorId: Id, workId: Id, attempt: number, result: unknown): PiopleEvent {
+    return this.mutate({
+      type: "work.completed", contextId, actorId, key: `complete:${workId}:${attempt}`, replayFirst: true,
+      check: () => this.mustHold(contextId, actorId, workId, attempt),
+      write: () => {
+        const info = this.db.prepare(`UPDATE work SET status='done', result=?, lease_until=NULL, updated_at=? WHERE context_id=? AND id=? AND status='claimed' AND claimed_by=? AND attempt=?`).run(
+          JSON.stringify(result ?? null), Date.now(), contextId, workId, actorId, attempt,
+        );
+        if (info.changes !== 1) throw new Error(`stale-claim: ${actorId} no longer holds ${workId} attempt ${attempt}`);
+        return { workId, attempt, result: result ?? null };
+      },
+    });
+  }
+
+  /** retry=true reopens the work for anyone eligible; otherwise it ends as failed. */
+  failWork(contextId: Id, actorId: Id, workId: Id, attempt: number, reason: string, retry = false): PiopleEvent {
+    return this.mutate({
+      type: "work.failed", contextId, actorId, key: `fail:${workId}:${attempt}`, replayFirst: true,
+      check: () => this.mustHold(contextId, actorId, workId, attempt),
+      write: () => {
+        const info = this.db.prepare(`UPDATE work SET status=?, claimed_by=${retry ? "NULL" : "claimed_by"}, lease_until=NULL, updated_at=? WHERE context_id=? AND id=? AND status='claimed' AND claimed_by=? AND attempt=?`).run(
+          retry ? "open" : "failed", Date.now(), contextId, workId, actorId, attempt,
+        );
+        if (info.changes !== 1) throw new Error(`stale-claim: ${actorId} no longer holds ${workId} attempt ${attempt}`);
+        return { workId, attempt, reason, retry };
+      },
+    });
+  }
+
+  private mustHold(contextId: Id, actorId: Id, workId: Id, attempt: number): void {
+    this.mustMember(contextId, actorId, "write");
+    const w = this.getWork(contextId, workId);
+    if (!w) throw new Error(`unknown-work: ${workId}`);
+    if (w.claimedBy !== actorId || w.attempt !== attempt || w.status !== "claimed") {
+      throw new Error(`stale-claim: ${actorId} does not hold ${workId} attempt ${attempt} (now ${w.status}, attempt ${w.attempt}, held by ${w.claimedBy ?? "nobody"})`);
+    }
+  }
+
   /**
    * Move my read cursor forward (never back, never past the end of the log).
    * Acknowledging is not resolving: pending items are derived from open state, not from the cursor.
@@ -375,7 +545,15 @@ export class Store {
       ? (this.db.prepare(`SELECT id, question, options, requested_by FROM decisions WHERE context_id=? AND status='open' ORDER BY created_at`).all(contextId) as Array<{ id: string; question: string; options: string; requested_by: string }>)
           .map((d) => ({ id: d.id, question: d.question, options: JSON.parse(d.options) as string[], requestedBy: d.requested_by }))
       : [];
-    return { assistance: asks.map((a) => ({ key: a.key, from: a.from_actor, question: a.question, seq: a.seq })), decisions };
+    const now = Date.now();
+    const canWork = !!this.caps(contextId, actorId)?.includes("write");
+    const open = canWork
+      ? this.claimableWork(contextId, now).filter((w) => this.cannotClaim(w, actorId, now) === null)
+          .map((w) => ({ id: w.id, from: w.requestedBy, skill: w.skill, to: w.to, input: w.input }))
+      : [];
+    const mine = (this.db.prepare(`SELECT * FROM work WHERE context_id=? AND status='claimed' AND claimed_by=? ORDER BY rowid`).all(contextId, actorId) as WorkRow[])
+      .map((r) => this.workItem(r)).map((w) => ({ id: w.id, attempt: w.attempt, leaseUntil: w.leaseUntil, input: w.input }));
+    return { assistance: asks.map((a) => ({ key: a.key, from: a.from_actor, question: a.question, seq: a.seq })), decisions, work: { open, mine } };
   }
 
   /** What happened while I was away, across every context I can read. */
@@ -385,7 +563,7 @@ export class Store {
       const cursor = this.cursor(c.id, actorId);
       const unread = (this.db.prepare(`SELECT COUNT(*) n FROM events WHERE context_id=? AND seq>? AND actor_id<>?`).get(c.id, cursor, actorId) as { n: number }).n;
       const p = this.pending(c.id, actorId);
-      return { context: c.id, title: c.title, cursor, unread, pending: p.assistance.length + p.decisions.length };
+      return { context: c.id, title: c.title, cursor, unread, pending: p.assistance.length + p.decisions.length + p.work.open.length + p.work.mine.length };
     });
   }
 

@@ -16,14 +16,24 @@ type Op = {
 
 const str = (a: Args, k: string) => String(a[k]);
 const list = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : v == null || v === "" ? [] : String(v).split(","));
+const json = (v: unknown): unknown => {
+  if (typeof v !== "string") return v ?? null;
+  try {
+    return JSON.parse(v);
+  } catch {
+    return v;
+  }
+};
+const flag = (v: unknown) => v === true || v === "true";
 const key = (a: Args) => (a.key == null ? randomUUID() : String(a.key));
 
 export const OPS: Record<string, Op> = {
   actor: {
-    description: "Register or rename the calling actor (kind inferred from id prefix human:/agent:)",
-    required: [], optional: ["name"],
+    description: "Register or rename the calling actor (kind inferred from id prefix human:/agent:); --skills a,b declares routing hints, not permissions",
+    required: [], optional: ["name", "skills"],
     run: (s, as, a) => {
       s.upsertActor({ id: as, kind: as.startsWith("human:") ? "human" : "agent", name: a.name == null ? as : str(a, "name") });
+      if (a.skills != null) s.setSkills(as, list(a.skills));
       return { id: as };
     },
   },
@@ -53,6 +63,34 @@ export const OPS: Record<string, Op> = {
     description: "Move my read cursor forward to --seq (never back). Does not resolve pending items",
     required: ["context", "seq"],
     run: (s, as, a) => ({ cursor: s.ack(str(a, "context"), as, Number(a.seq)) }),
+  },
+  "work-request": {
+    description: "Ask for work, addressed to an actor (--to) and/or anyone declaring a skill (--skill)",
+    required: ["context", "input"], optional: ["to", "skill", "id"],
+    run: (s, as, a) => {
+      const id = a.id == null ? `w-${randomUUID().slice(0, 8)}` : str(a, "id");
+      return s.requestWork(str(a, "context"), as, { id, to: a.to == null ? null : str(a, "to"), skill: a.skill == null ? null : str(a, "skill"), input: json(a.input) });
+    },
+  },
+  "work-claim": {
+    description: "Atomically claim work: --id <work> or --next for the oldest I may take. Returns the attempt number; pass work:<id>:<attempt> on as your idempotency key",
+    required: ["context"], optional: ["id", "next", "lease-ms"],
+    run: (s, as, a) => {
+      const lease = a["lease-ms"] == null ? undefined : Number(a["lease-ms"]);
+      if (a.id != null) return s.claimWork(str(a, "context"), as, str(a, "id"), lease);
+      if (flag(a.next)) return s.claimNext(str(a, "context"), as, lease) ?? { work: null };
+      throw new Error("missing: id or next");
+    },
+  },
+  "work-complete": {
+    description: "Finish claimed work with the attempt you were given; refused if the claim moved on",
+    required: ["context", "id", "attempt"], optional: ["result"],
+    run: (s, as, a) => s.completeWork(str(a, "context"), as, str(a, "id"), Number(a.attempt), json(a.result)),
+  },
+  "work-fail": {
+    description: "Give up claimed work; --retry true reopens it for anyone eligible",
+    required: ["context", "id", "attempt", "reason"], optional: ["retry"],
+    run: (s, as, a) => s.failWork(str(a, "context"), as, str(a, "id"), Number(a.attempt), str(a, "reason"), flag(a.retry)),
   },
   post: {
     description: "Post a message",
