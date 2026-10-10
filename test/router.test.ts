@@ -220,3 +220,10 @@ test("route-recent is for routers only", () => {
   assert.throws(() => store.routeRecent("human:bob", "human:bob", 100), /router/i);
   store.close();
 });
+
+test("route-recent: a message posted in a realm itself belongs to that realm, so an external classifier allowed that realm may see it", () => {
+  const store = world();
+  store.postMessage("realm-infra", "human:alice", "r1", "realm-wide notice");
+  assert.deepEqual(store.routeRecent(R, "human:bob", 1e9, 3).map((r) => [r.context, r.realm]), [["realm-infra", "realm-infra"]]);
+  store.close();
+});

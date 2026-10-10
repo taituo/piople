@@ -22,19 +22,25 @@ export function exportLabelled(store: Store, o: ExportOptions = {}): EvalDataset
   const minLength = o.minLength ?? 2;
   const contexts = store.db.prepare(`SELECT id, kind, title, realm_id, parent_id FROM contexts WHERE kind IN ('realm','channel','case') ORDER BY created_at, rowid`).all() as Array<{ id: string; kind: "realm" | "channel" | "case"; title: string; realm_id: string | null; parent_id: string | null }>;
   const ids = new Set(contexts.map((c) => c.id));
-  const members = store.db.prepare(`SELECT context_id, actor_id, capabilities FROM members`).all() as Array<{ context_id: string; actor_id: string; capabilities: string }>;
+  // What an actor may address NOW, with realm rights applied (store.targets): a post is only a usable label if its author
+  // can still address that channel, and the evaluation replays exactly these rights. A channel needs its realm joined first.
+  const realmOf = new Map(contexts.map((c) => [c.id, c.realm_id]));
+  const actors = (store.db.prepare(`SELECT DISTINCT actor_id FROM members`).all() as Array<{ actor_id: string }>).map((r) => r.actor_id);
   const byActor = new Map<string, string[]>();
-  for (const m of members) {
-    if (!ids.has(m.context_id) || !(JSON.parse(m.capabilities) as string[]).includes("write")) continue;
-    (byActor.get(m.actor_id) ?? byActor.set(m.actor_id, []).get(m.actor_id)!).push(m.context_id);
+  for (const a of actors) {
+    const can = store.targets(a).map((t) => t.id).filter((id) => ids.has(id));
+    const withRealms = new Set(can);
+    for (const id of can) { const r = realmOf.get(id); if (r && ids.has(r)) withRealms.add(r); }
+    if (withRealms.size) byActor.set(a, [...withRealms]);
   }
+  const addressable = new Map([...actors].map((a) => [a, new Set(store.targets(a).map((t) => t.id))]));
   const rows = store.db.prepare(`SELECT seq, context_id, actor_id, data FROM events WHERE type='message.posted' AND actor_id LIKE 'human:%' AND seq>? ORDER BY seq`).all(o.since ?? 0) as Array<{ seq: number; context_id: string; actor_id: string; data: string }>;
   const cases = [];
   for (const r of rows) {
     if (!ids.has(r.context_id)) continue; // ingress or unknown
     const d = JSON.parse(r.data) as { text?: unknown; via?: unknown };
     if (d.via === "route" || typeof d.text !== "string" || d.text.trim().length < minLength) continue;
-    if (!byActor.get(r.actor_id)?.includes(r.context_id)) continue; // posted, then lost the right: no longer a valid label
+    if (!addressable.get(r.actor_id)?.has(r.context_id)) continue; // posted, then lost the right: no longer a valid label
     cases.push({ id: `r${r.seq}`, sender: r.actor_id, text: o.redact ? redactText(d.text) : d.text, expect: r.context_id, tags: ["real"] });
   }
   const used = new Set(cases.map((c) => c.sender));

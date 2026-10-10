@@ -41,3 +41,18 @@ test("export: human posts into channels become labelled cases; router deliveries
 test("redactText masks e-mail addresses, URLs and long numbers, nothing else", () => {
   assert.equal(redactText("mail x@y.fi, see https://a.b/c?d=1 and invoice 123456789 or room 42"), "mail <email>, see <url> and invoice <number> or room 42");
 });
+
+test("export: an author whose realm role was lowered no longer has a usable label, and the dataset still replays", async () => {
+  const s = new Store(":memory:");
+  s.createContext(ctx("realm-a", "realm", "Infra"), "human:alice");
+  s.createContext(ctx("ch-1", "channel", "Incidents outage", { realmId: "realm-a" }), "human:alice");
+  s.join({ contextId: "realm-a", actorId: "human:bob", capabilities: ["read", "write"], joinedAt: 2 }, "j1", "human:alice");
+  s.join({ contextId: "ch-1", actorId: "human:bob", capabilities: ["read", "write"], joinedAt: 2 }, "j2", "human:alice");
+  s.postMessage("ch-1", "human:bob", "p1", "the outage is back");
+  s.postMessage("ch-1", "human:alice", "p2", "looking at the outage");
+  s.db.prepare(`UPDATE members SET capabilities=? WHERE context_id='realm-a' AND actor_id='human:bob'`).run(JSON.stringify(["read"]));
+  const d = exportLabelled(s);
+  assert.deepEqual(d.cases.map((c) => c.sender), ["human:alice"], "bob can no longer address the channel through the realm: his post is not a usable label");
+  await runRoutingEval(d, keywordClassifier()); // must not throw dataset-invalid / not-in-realm
+  s.close();
+});

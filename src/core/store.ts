@@ -810,6 +810,12 @@ export class Store {
    * with their realm so the router can hold back what an external classifier may not see. For replies that mean
    * nothing alone. Never reaches into a context the sender cannot read, and never into ingress contexts.
    */
+  /** The realm a context belongs to for visibility rules: a realm belongs to itself (as in `permitted` for targets). */
+  private realmOf(contextId: Id): Id | null {
+    const c = this.contextRow(contextId);
+    return c ? (c.kind === "realm" ? contextId : c.realm_id) : null;
+  }
+
   routeRecent(router: Id, sender: Id, before: number, limit = 3): Array<{ seq: number; context: Id; realm: Id | null; own: boolean; text: string }> {
     this.mustRouter(router);
     const n = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), 10) : 3;
@@ -818,7 +824,7 @@ export class Store {
     if (!readable.length) return [];
     const q = this.db.prepare(`SELECT seq, context_id, actor_id, data FROM events WHERE type='message.posted' AND seq<? AND context_id IN (${readable.map(() => "?").join(",")}) ORDER BY seq DESC LIMIT ?`);
     const out = (q.all(Math.trunc(before), ...readable, n) as Array<{ seq: number; context_id: string; actor_id: string; data: string }>).map((r) => ({
-      seq: r.seq, context: r.context_id, realm: this.contextRow(r.context_id)?.realm_id ?? null, own: r.actor_id === sender, text: String((JSON.parse(r.data) as { text?: unknown }).text ?? ""),
+      seq: r.seq, context: r.context_id, realm: this.realmOf(r.context_id), own: r.actor_id === sender, text: String((JSON.parse(r.data) as { text?: unknown }).text ?? ""),
     }));
     return out.reverse();
   }
