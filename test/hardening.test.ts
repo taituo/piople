@@ -278,3 +278,30 @@ test("one read of a case is bounded in bytes: a writer cannot make every poll a 
   assert.ok(first.length >= 1 && first.length < 8, `events returned ${first.length} at once`);
   store.close();
 });
+
+test("the open work an inbox lists is bounded too: whoever may request work cannot make an agent's inbox (and prompt) enormous", async () => {
+  const { alice, as, store } = world();
+  await alice("create", { id: "c1", title: "t" });
+  await alice("join", { context: "c1", actor: "agent:x", caps: "read,write" });
+  const big = JSON.stringify({ blob: "z".repeat(90_000) });
+  for (let i = 0; i < 30; i++) await alice("work-request", { context: "c1", id: `w${i}`, to: "agent:x", input: big });
+  const agent = as("agent:x");
+  const first = await agent("inbox", { context: "c1" });
+  const chars = JSON.stringify(first.pending.work.open).length;
+  assert.ok(first.pending.work.open.length >= 1 && first.pending.work.open.length < 30, `listed ${first.pending.work.open.length}`);
+  assert.ok(chars < 400_000, `the open list was ${chars} characters`);
+  assert.equal(first.pending.work.moreOpen, 30 - first.pending.work.open.length, "and says how many were left out");
+  // taking the listed ones brings the rest into view; nothing is lost
+  const taken = new Set<string>();
+  for (let round = 0; round < 40; round++) {
+    const inbox = await agent("inbox", { context: "c1" });
+    if (!inbox.pending.work.open.length) break;
+    for (const w of inbox.pending.work.open) {
+      const c = await agent("work-claim", { context: "c1", id: w.id });
+      await agent("work-complete", { context: "c1", id: w.id, attempt: c.work.attempt, result: "1" });
+      taken.add(w.id);
+    }
+  }
+  assert.equal(taken.size, 30, "every item was offered in the end");
+  store.close();
+});

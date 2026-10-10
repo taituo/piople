@@ -136,6 +136,8 @@ export type Pending = {
   work: {
     /** claimable by me right now: addressed to me or to a skill I declared, open or lease expired */
     open: Array<{ id: Id; from: Id; skill: string | null; to: Id | null; input: unknown }>;
+    /** Open items left out to keep the list small (see PENDING_OPEN_MAX): they come as the others are taken. */
+    moreOpen?: number;
     /** claimed by me and not finished (resume these after a restart) */
     mine: Array<{ id: Id; attempt: number; leaseUntil: number | null; input: unknown }>;
   };
@@ -166,6 +168,9 @@ type Mutation = {
 export const MAX_READ = 1000;
 /** The most event data one read returns (the first event always comes, even if it alone is larger). */
 export const MAX_READ_BYTES = 4_000_000;
+/** How many open work items, and how many characters of their inputs, one inbox lists. */
+export const PENDING_OPEN_MAX = 50;
+export const PENDING_OPEN_CHARS = 200_000;
 /** The longest claim lease: a holder that dies keeps its work this long at most. Without a bound, 1e14 ms (3000 years) made a claim permanent. */
 export const MAX_LEASE_MS = 7 * 24 * 3600 * 1000;
 const checkLease = (leaseMs: number | undefined) => {
@@ -1054,13 +1059,24 @@ export class Store {
       : [];
     const now = Date.now();
     const canWork = !!this.caps(contextId, actorId)?.includes("write");
-    const open = canWork
+    const allOpen = canWork
       ? this.claimableWork(contextId, now).filter((w) => this.cannotClaim(w, actorId, now) === null)
           .map((w) => ({ id: w.id, from: w.requestedBy, skill: w.skill, to: w.to, input: w.input }))
       : [];
+    // Every open item's whole input comes with the inbox, and a Pi agent puts all of it in its prompt: 25 items of 0.9 MB made
+    // 26 MB of inbox, and whoever may request work for an agent could make that as big as they like. The first item always
+    // comes; the rest while the count and the size stay small. The others are offered when these are taken.
+    const open: typeof allOpen = [];
+    let openChars = 0;
+    for (const w of allOpen) {
+      const n = JSON.stringify(w.input ?? null).length;
+      if (open.length && (open.length >= PENDING_OPEN_MAX || openChars + n > PENDING_OPEN_CHARS)) break;
+      open.push(w);
+      openChars += n;
+    }
     const mine = (this.db.prepare(`SELECT * FROM work WHERE context_id=? AND status='claimed' AND claimed_by=? ORDER BY rowid`).all(contextId, actorId) as WorkRow[])
       .map((r) => this.workItem(r)).map((w) => ({ id: w.id, attempt: w.attempt, leaseUntil: w.leaseUntil, input: w.input }));
-    return { assistance: asks.map((a) => ({ key: a.key, from: a.from_actor, question: a.question, seq: a.seq })), decisions, work: { open, mine } };
+    return { assistance: asks.map((a) => ({ key: a.key, from: a.from_actor, question: a.question, seq: a.seq })), decisions, work: { open, ...(allOpen.length > open.length ? { moreOpen: allOpen.length - open.length } : {}), mine } };
   }
 
   /** What happened while I was away, across every context I can read. */
