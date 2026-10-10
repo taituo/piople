@@ -207,10 +207,12 @@ export function extractiveSummarizer(o: { perLine?: number; max?: number } = {})
  * gateways that want extra ones (the opencode Go gateway needs `x-opencode-session`). Summarising is a cheap job:
  * prefer a small non-reasoning model.
  */
-export function modelSummarizer(o: { baseUrl: string; apiKey?: string; modelId: string; maxWords?: number; maxTokens?: number; timeoutMs?: number; headers?: Record<string, string>; fetch?: typeof fetch }): Summarizer {
+export function modelSummarizer(o: { baseUrl: string; apiKey?: string; modelId: string; maxWords?: number; maxTokens?: number; timeoutMs?: number; headers?: Record<string, string>; fetch?: typeof fetch }): Summarizer & { stats: { calls: number; input: number; output: number } } {
   const request = o.fetch ?? fetch;
   const words = o.maxWords ?? 120;
+  const stats = { calls: 0, input: 0, output: 0 };
   return {
+    stats,
     name: "model", version: o.modelId,
     async summarize({ level, texts, firstSeq, lastSeq }) {
       const system = `You compress the history of a shared case between humans and agents. Write at most ${words} words. Keep who said or did what, ids, names, numbers, exact decisions and what is still owed. Never invent anything; say "unknown" rather than guess. Output only the summary.`;
@@ -226,7 +228,10 @@ export function modelSummarizer(o: { baseUrl: string; apiKey?: string; modelId: 
         throw new Error(`summarizer unreachable (${e instanceof Error ? e.name : "error"})`); // never echo the request
       }
       if (!res.ok) { await res.body?.cancel(); throw new Error(`summarizer returned HTTP ${res.status}`); }
-      const body = (await res.json().catch(() => null)) as { choices?: Array<{ finish_reason?: string; message?: { content?: unknown } }> } | null;
+      const body = (await res.json().catch(() => null)) as { choices?: Array<{ finish_reason?: string; message?: { content?: unknown } }>; usage?: { prompt_tokens?: number; completion_tokens?: number } } | null;
+      stats.calls++;
+      stats.input += body?.usage?.prompt_tokens ?? 0;
+      stats.output += body?.usage?.completion_tokens ?? 0;
       // A cut-off summary would be filed as if it were whole: refuse it. (Reasoning models spend max_tokens on thinking first.)
       if (body?.choices?.[0]?.finish_reason === "length") throw new Error("summarizer ran out of tokens before finishing: raise maxTokens (reasoning models need room to think) or use a non-reasoning model");
       const content = body?.choices?.[0]?.message?.content;

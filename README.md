@@ -316,6 +316,25 @@ await PiHarness.open({ /* ... */, memory: {
 - Measured with fakes: after 40 messages the prompt stays within budget, a fact planted deep in the history is
   absent from the view and found by zooming down, and a decision made long ago is still visible verbatim. How well a
   *real* model summarises and navigates is not measured here; do it as routing is measured, not assumed.
+- **Against Pi's own compaction** (`scripts/live-compaction.ts`, `gpt-4.1-mini` as agent and summariser, 70 messages
+  delivered one at a time, then the same five questions; one run each, Pi's books for the cost):
+
+  | | recall | tokens (all-in) |
+  | --- | --- | --- |
+  | whole transcript, no compaction | 5/5 | 48 k |
+  | Pi compaction (one linear summary, run once by hand) | 5/5 | 51 k |
+  | case memory (this section) | 3/5 (0/5 before a fix, below) | 113 k |
+
+  **At this size the memory does not pay for itself.** 70 short messages are about 5 k tokens, so the whole transcript
+  fits and is cheapest; Pi's compaction kept every planted fact and added almost nothing; the case memory put a view
+  into each of ~80 prompts (twice the tokens) and its recall depends on the model following `ZOOM`. With DeepSeek and
+  GLM it reached 5/5 (previous measurement), with `gpt-4.1-mini` it needed a fix: the model answered messages with
+  `ANSWER:`; Core refuses that, and the refusal now says to use `POST:` (0/5 to 3/5). The memory's claimed advantage
+  (exact recovery of detail a summary dropped) only shows when the history outgrows the window or the facts are
+  fine-grained, and this set exercises neither. **Until a harder benchmark says otherwise, prefer Pi's compaction and
+  treat the case memory as experimental.** A fair Pi run also needs a normal window: with a tiny one Pi leaves its own
+  output (and its summariser) one token of room and loops; and on the opencode Go gateway Pi's compaction request lacks
+  the `x-opencode-session` header the gateway demands, so it fails there (generation requests carry it).
 - Each delivery is its own small durable Pi conversation; they accumulate in the Pi store (not pruned yet).
 - **Measured with real models** (`scripts/live-memory.ts`): four facts and one human decision planted in a 70-message
   case, asked back one at a time. Agent `deepseek-v4-flash`: no memory 1/5 (only the fact still inside the newest

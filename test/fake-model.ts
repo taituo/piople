@@ -8,7 +8,7 @@ export const lastUser = (m: ChatMessage[]) => text([...m].reverse().find((x) => 
 
 /** A deterministic OpenAI-compatible /chat/completions endpoint (SSE) that answers from a function. */
 export type FakeToolCall = { toolCall: { name: string; args: unknown } };
-export async function fakeModel(reply: (messages: ChatMessage[], n: number) => string | { status: number } | FakeToolCall): Promise<FakeModel> {
+export async function fakeModel(reply: (messages: ChatMessage[], n: number) => string | { status: number } | FakeToolCall, opts: { tokensFromSize?: boolean } = {}): Promise<FakeModel> {
   const requests: ChatMessage[][] = [];
   const bodies: Array<Record<string, any>> = [];
   const srv = http.createServer((req, res) => {
@@ -19,11 +19,12 @@ export async function fakeModel(reply: (messages: ChatMessage[], n: number) => s
       requests.push(body.messages);
       bodies.push(body);
       const out = reply(body.messages, requests.length);
+      const promptTokens = opts.tokensFromSize ? Math.ceil(JSON.stringify(body.messages).length / 4) : 10; // Pi decides on compaction from the usage the provider reports
       if (typeof out === "object" && "toolCall" in out) {
         res.writeHead(200, { "content-type": "text/event-stream" });
         const chunk = (o: unknown) => res.write(`data: ${JSON.stringify(o)}\n\n`);
         chunk({ id: "f", object: "chat.completion.chunk", model: body.model, choices: [{ index: 0, delta: { role: "assistant", tool_calls: [{ index: 0, id: `call_${requests.length}`, type: "function", function: { name: out.toolCall.name, arguments: JSON.stringify(out.toolCall.args) } }] } }] });
-        chunk({ id: "f", object: "chat.completion.chunk", model: body.model, choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } });
+        chunk({ id: "f", object: "chat.completion.chunk", model: body.model, choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: promptTokens, completion_tokens: 5, total_tokens: promptTokens + 5 } });
         res.write("data: [DONE]\n\n");
         res.end();
         return;
@@ -36,7 +37,7 @@ export async function fakeModel(reply: (messages: ChatMessage[], n: number) => s
       res.writeHead(200, { "content-type": "text/event-stream" });
       const chunk = (o: unknown) => res.write(`data: ${JSON.stringify(o)}\n\n`);
       chunk({ id: "f", object: "chat.completion.chunk", model: body.model, choices: [{ index: 0, delta: { role: "assistant", content: out } }] });
-      chunk({ id: "f", object: "chat.completion.chunk", model: body.model, choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } });
+      chunk({ id: "f", object: "chat.completion.chunk", model: body.model, choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: promptTokens, completion_tokens: 5, total_tokens: promptTokens + 5 } });
       res.write("data: [DONE]\n\n");
       res.end();
     });

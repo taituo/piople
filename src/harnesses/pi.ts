@@ -65,6 +65,13 @@ export type PiHarnessOptions = {
    * cost. Over the limit the run is aborted and the agent says so in the case.
    */
   maxToolCalls?: number;
+  /**
+   * Pi's own context handling. `contextWindow` is the model's window as Pi sees it (default 128000, a guess: set the real
+   * one); `compaction` are Pi's automatic-compaction thresholds (reserveTokens, keepRecentTokens, backgroundTokens).
+   * Pi compacts a conversation's own transcript, so this matters in the default one-conversation-per-case mode and is
+   * moot with `memory`, which starts every delivery fresh.
+   */
+  context?: { contextWindow?: number; compaction?: { enabled?: boolean; reserveTokens?: number; keepRecentTokens?: number; backgroundTokens?: number } };
   /** Called with every model reply (and the prompt that produced it) before it is parsed: for audit and debugging. */
   onReply?: (e: { requestId: string; prompt: string; reply: string }) => void;
 };
@@ -182,7 +189,7 @@ export class PiHarness implements Harness {
     const gate: GateRef = {};
     if (o.environment && o.nativeTools) registry.install(environmentExtension(o.environment, gate));
     const rt = await PiRuntime.open(storage, {
-      models: createPiModels(o), registry, settings: { retry: { maxRetries: 1 } },
+      models: createPiModels(o), registry, settings: { retry: { maxRetries: 1 }, ...(o.context?.compaction ? { compaction: o.context.compaction } : {}) },
     } as never, BACKGROUND_CONTEXT);
     rt.resume();
     const memory = o.memory ? CaseMemory.open(o.dir === ":memory:" ? ":memory:" : join(o.dir, `${safe}.memory.sqlite`), o.memory) : undefined;
@@ -190,6 +197,33 @@ export class PiHarness implements Harness {
     gate.check = (name, args) => h.beforeToolCall(name, args);
     gate.exhausted = () => h.limitHit;
     return h;
+  }
+
+  /**
+   * Pi's own accounting for everything in this store: every model call, including the ones this harness does not make
+   * itself (Pi's compaction). `usage` above counts only this harness's own requests and skips replays; this does not.
+   */
+  async spend(): Promise<{ calls: number; input: number; output: number; models: Record<string, { input: number; output: number }> }> {
+    const u = (await this.rt.usage(BACKGROUND_CONTEXT)) as unknown as { models?: Record<string, { input?: number; output?: number }> };
+    const models: Record<string, { input: number; output: number }> = {};
+    let input = 0, output = 0;
+    for (const [k, v] of Object.entries(u.models ?? {})) {
+      models[k] = { input: v.input ?? 0, output: v.output ?? 0 };
+      input += v.input ?? 0;
+      output += v.output ?? 0;
+    }
+    return { calls: this.usage.calls, input, output, models };
+  }
+
+  /**
+   * Compact one case's transcript now (Pi's own summary of the older part; the newest `keepRecentTokens` stay verbatim).
+   * Pi does this by itself near the end of the window; this is for tests and for an operator who wants it sooner.
+   */
+  async compact(contextId: string, instructions?: string): Promise<"completed" | "failed"> {
+    const conv = await this.conversation(contextId);
+    const id = await conv.compact(instructions, BACKGROUND_CONTEXT);
+    const done = (await this.rt.waitForTask(id as never, BACKGROUND_CONTEXT)) as unknown as { state?: { outcome?: { status?: string } } };
+    return done.state?.outcome?.status === "completed" ? "completed" : "failed";
   }
 
   async close(): Promise<void> {
@@ -344,7 +378,10 @@ export class PiHarness implements Harness {
         case "FAIL": await s.run("work-fail", { id: parts[0], attempt: parts[1], reason: parts.slice(2).join(" | ") }); return null;
       }
     } catch (e) {
-      return `REFUSED ${cmd}: ${e instanceof Error ? e.message : String(e)}`;
+      const why = e instanceof Error ? e.message : String(e);
+      // A model that answers a message with ANSWER used to be told only that the key is unknown, and gave up. Say what to do.
+      const hint = cmd === "ANSWER" && /unknown-request/.test(why) ? ' ANSWER is only for an ask listed under "Owed to you". To reply to a message, write POST: <your reply>.' : "";
+      return `REFUSED ${cmd}: ${why}.${hint}`.replace(/\.\./g, ".");
     }
     return null;
   }
@@ -455,7 +492,7 @@ function createPiModels(o: PiHarnessOptions): Models {
     models: [{
       id: o.modelId, name: o.modelId, api: "openai-completions", provider: "piople", baseUrl: o.provider.baseUrl,
       reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 128000, maxTokens: o.maxTokens ?? 2000,
+      contextWindow: o.context?.contextWindow ?? 128000, maxTokens: o.maxTokens ?? 2000,
       compat: { sendSessionAffinityHeaders: true, sessionAffinityFormat: "openrouter" },
     }],
     api: openAICompletionsApi(),

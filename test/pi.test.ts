@@ -235,3 +235,19 @@ test("the reminder is given once per delivery: a model that keeps writing prose 
   await model.close();
   store.close();
 });
+
+test("a model that answers a message with ANSWER is told to use POST, and recovers", async () => {
+  const { store, alice } = world();
+  const model = await fakeModel((m, n) => (n === 1 ? "ANSWER: capital of Finland? | Helsinki" : /write POST:/.test(lastUser(m)) ? "POST: Helsinki" : "NOOP"));
+  const host = new Host(new LocalCore(store));
+  await host.add({ actor: "agent:pi", harness: await PiHarness.open(piOpts(model.baseUrl)) });
+  await alice("create", { id: "c1", title: "t" });
+  await alice("join", { context: "c1", actor: "agent:pi", caps: "read,write" });
+  await alice("post", { context: "c1", text: "capital of Finland?" });
+  await host.settle();
+  assert.match(lastUser(model.requests[1]!), /REFUSED ANSWER: unknown-request: .* ANSWER is only for an ask listed under "Owed to you"\. To reply to a message, write POST/);
+  assert.deepEqual(posts(store), ["Helsinki"]);
+  await host.close();
+  await model.close();
+  store.close();
+});
