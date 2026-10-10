@@ -28,6 +28,11 @@ export type Classification = {
 };
 export interface Classifier {
   readonly name: string;
+  /**
+   * True when the classifier is a service outside the operator's control: it then only ever sees targets in
+   * the realms the operator allowed (RouterOptions.external). Default false.
+   */
+  readonly external?: boolean;
   /** Pin this for tests and comparisons; it is recorded with every decision. */
   readonly version: string;
   classify(input: ClassifyInput): Promise<Classification>;
@@ -45,18 +50,34 @@ export type RouterOptions = {
   maxOptions?: number;
   /** How many waiting messages to take per poll. Default 20. */
   batch?: number;
+  /**
+   * Privacy for external classifiers. Destination names are realm-private, so an external classifier is offered
+   * only targets inside these realms. The default is none: nothing leaves, every message is left unresolved.
+   */
+  external?: { allowRealms: string[] };
+  /** Leave a message unresolved when the classifier says a human is needed with at least this probability. Unset = never gate. */
+  needsHumanAbove?: number;
 };
 
+const clamp01 = (n: number) => n >= 0 && n <= 1;
 const REFUSALS = /^(forbidden|not-a-member|not-in-realm|bad-route|work-needs-target)\b/;
 const top = (p: Record<string, number>, n = 10) => Object.fromEntries(Object.entries(p).sort((a, b) => b[1] - a[1]).slice(0, n));
 
 type Stage = { stage: string; offered: number; choice: string | null; confidence: number };
 
 export class RouterHarness implements Harness {
-  private readonly o: Required<RouterOptions>;
+  private readonly o: Required<Omit<RouterOptions, "external" | "needsHumanAbove">> & Pick<RouterOptions, "external" | "needsHumanAbove">;
   constructor(o: RouterOptions) {
-    if (!(o.minConfidence >= 0 && o.minConfidence <= 1)) throw new Error("minConfidence must be between 0 and 1");
+    if (!clamp01(o.minConfidence)) throw new Error("minConfidence must be between 0 and 1");
+    if (o.needsHumanAbove !== undefined && !clamp01(o.needsHumanAbove)) throw new Error("needsHumanAbove must be between 0 and 1");
     this.o = { maxOptions: 255, batch: 20, ...o };
+  }
+
+  /** What the classifier may be shown. An external one sees only allowed realms; by default that is nothing. */
+  private permitted(targets: Target[]): Target[] {
+    if (!this.o.classifier.external) return targets;
+    const allow = new Set(this.o.external?.allowRealms ?? []);
+    return targets.filter((t) => allow.has(t.kind === "realm" ? t.id : (t.realm ?? "")));
   }
 
   async step(_s: Step): Promise<void> {
@@ -80,10 +101,12 @@ export class RouterHarness implements Harness {
   }
 
   private async route(api: PollApi, sub: Submission): Promise<void> {
-    const targets = await api.run<Target[]>("route-targets", { sender: sub.sender });
+    const addressable = await api.run<Target[]>("route-targets", { sender: sub.sender });
     const ref = { ingress: sub.ingress, submitted: sub.key };
     const unresolved = (reason: string, data: Record<string, unknown> = {}) => api.run("route-unresolved", { ...ref, reason, data: JSON.stringify(data) });
-    if (!targets.length) return void (await unresolved("no-targets"));
+    if (!addressable.length) return void (await unresolved("no-targets"));
+    const targets = this.permitted(addressable);
+    if (!targets.length) return void (await unresolved("no-permitted-targets")); // nothing was sent anywhere
 
     // A classification recorded before a crash is reused, not paid for twice.
     const c = this.reusable(sub) ?? (await this.classify(api, sub, targets, ref));
@@ -91,6 +114,8 @@ export class RouterHarness implements Harness {
     if (c.choice === null) return void (await unresolved("no-choice", { confidence: c.confidence }));
     if (!offered.has(c.choice)) return void (await unresolved("invalid-choice", { choice: c.choice }));
     if (c.confidence < this.o.minConfidence) return void (await unresolved("low-confidence", { confidence: c.confidence, minConfidence: this.o.minConfidence }));
+    const human = Number(c.extras?.needsHuman ?? 0);
+    if (this.o.needsHumanAbove !== undefined && human >= this.o.needsHumanAbove) return void (await unresolved("needs-human", { needsHuman: human, threshold: this.o.needsHumanAbove }));
     try {
       await api.run("route-resolve", { ...ref, context: c.choice, deliver: this.o.mode === "enforce", ...(c.skill ? { as: "work", skill: c.skill } : {}) });
     } catch (e) {
@@ -101,9 +126,9 @@ export class RouterHarness implements Harness {
   }
 
   private reusable(sub: Submission): Classification | null {
-    const r = sub.classification as { classifier?: { name?: string; version?: string }; ruleVersion?: string; choice?: string | null; confidence?: number; skill?: string | null; error?: string } | null;
+    const r = sub.classification as { classifier?: { name?: string; version?: string }; ruleVersion?: string; choice?: string | null; confidence?: number; skill?: string | null; extras?: Record<string, unknown> | null; error?: string } | null;
     if (!r || r.error || r.classifier?.name !== this.o.classifier.name || r.classifier?.version !== this.o.classifier.version || r.ruleVersion !== this.o.ruleVersion) return null;
-    return { choice: r.choice ?? null, probabilities: {}, confidence: r.confidence ?? 0, skill: r.skill ?? null };
+    return { choice: r.choice ?? null, probabilities: {}, confidence: r.confidence ?? 0, skill: r.skill ?? null, extras: r.extras ?? undefined };
   }
 
   private async classify(api: PollApi, sub: Submission, targets: Target[], ref: { ingress: string; submitted: string }): Promise<Classification> {
@@ -139,6 +164,7 @@ export class RouterHarness implements Harness {
       data: JSON.stringify({
         classifier: { name: this.o.classifier.name, version: this.o.classifier.version }, ruleVersion: this.o.ruleVersion, mode: this.o.mode,
         choice: result.choice, confidence: result.confidence, skill: result.skill ?? null, probabilities: top(result.probabilities), stages, extras: result.extras ?? null,
+        external: this.o.classifier.external ?? false, offered: targets.length,
       }),
     });
     return result;

@@ -137,8 +137,36 @@ A submitted message waits in its sender's own **ingress** (a context Core create
 - Who may route is the operator's decision (`add-router`), like credentials: it is not an op and not an event.
 
 The `Classifier` interface (`classify({text, targets, stage}) -> {choice, probabilities, confidence, skill?}`)
-has a deterministic `keywordClassifier()` for tests and as an offline baseline. A real classifier (Jev, or a
-local model) plugs in behind the same interface; none is wired yet.
+has a deterministic `keywordClassifier()` for tests and as an offline baseline, and `jevClassifier()`
+(`src/harnesses/jev.ts`) for Jev.
+
+**Jev** (plain fetch, no SDK; request/response shapes follow the open-source jev-classifier client):
+
+```ts
+const router = new RouterHarness({
+  classifier: jevClassifier({ apiKey, model: "<exact model id>" }),   // no default model: pin it
+  mode: "shadow", minConfidence: /* from measured results */ 0.7, ruleVersion: "r1",
+  external: { allowRealms: ["realm-infra"] },                          // default: none
+  needsHumanAbove: 0.8,                                                // optional; unset = never gate
+});
+```
+
+- One call asks two questions: `target` (`choice` over the offered destinations plus an explicit
+  "none fits" option, so the model is never forced to pick) and `needs_human` (`noul`). Urgency (`score`)
+  is not asked yet: its request shape is not verified.
+- **Privacy: nothing leaves by default.** Destination names are realm-private, so an *external* classifier
+  is offered only targets in `external.allowRealms`; with none configured every message is left
+  `no-permitted-targets` and not a single request is made. Only the message text is sent (no sender, no hop
+  count). Note that the text of a message is sent whenever at least one allowed realm is a candidate.
+- **Pinned model**: `model` is required and recorded with every decision (`classifier.version`). A moving
+  alias would make recorded decisions uninterpretable.
+- **Strict parsing**: a missing/unoffered choice, an incomplete or out-of-range distribution, or a wrong
+  answer type is an error, never a guess. Where the confidence came from (`answer`, `providerMetadata`, or the
+  chosen option's own probability) is recorded in `extras.confidenceSource`.
+- Errors never echo the request, the provider's body or the key; redirects are refused; 30 s timeout;
+  429/5xx leave messages pending and are retried.
+- `test/jev.test.ts` runs against a local stand-in endpoint. `test/jev.live.test.ts` calls the real one and is
+  skipped unless `OPENROUTER_API_KEY` (or `JEV_API_KEY`) and `JEV_MODEL` are set.
 
 ### Inbox: a participant need not be running
 
