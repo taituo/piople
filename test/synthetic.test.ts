@@ -15,7 +15,7 @@ test("four actors, one case, full loop with idempotent replay", () => {
   }
   s.createContext({ id: "case-1", kind: "case", title: "Checkout API down", goal: "Find cause, fix, verify", createdAt: Date.now() }, "human:alice");
   for (const a of ["human:bob", "agent:scout", "agent:builder"]) {
-    s.join({ contextId: "case-1", actorId: a, capabilities: a === "human:bob" ? ["read", "write", "decide"] : ["read", "write"], joinedAt: Date.now() }, `join:${a}`);
+    s.join({ contextId: "case-1", actorId: a, capabilities: a === "human:bob" ? ["read", "write", "decide"] : ["read", "write"], joinedAt: Date.now() }, `join:${a}`, "human:alice");
   }
   // idempotent replay: same key returns same event, no duplicate
   const m1 = s.postMessage("case-1", "human:alice", "k1", "auttakaa tässä");
@@ -43,7 +43,7 @@ test("echo delegate may answer but never decide; hypotheses promote", () => {
   s.upsertActor({ id: "human:alice", kind: "human", name: "alice" });
   s.upsertActor({ id: "agent:scout", kind: "agent", name: "scout" });
   s.createContext({ id: "case-e", kind: "case", title: "e", goal: "e", createdAt: Date.now() }, "human:alice");
-  s.join({ contextId: "case-e", actorId: "agent:scout", capabilities: ["read", "write"], joinedAt: Date.now() }, "j");
+  s.join({ contextId: "case-e", actorId: "agent:scout", capabilities: ["read", "write"], joinedAt: Date.now() }, "j", "human:alice");
   s.recordObservation({ id: "o1", contextId: "case-e", kind: "finding", authorId: "agent:scout", text: "h?", status: "hypothesis", evidence: [], createdAt: Date.now() });
   s.promoteObservation("o1", "human:alice", "confirmed");
   const row = s.db.prepare(`SELECT status FROM artifacts WHERE id='o1'`).get() as { status: string };
@@ -63,7 +63,7 @@ test("invited expert answers without membership; stranger cannot", () => {
   s.upsertActor({ id: "agent:scout", kind: "agent", name: "scout" });
   s.upsertActor({ id: "agent:outsider", kind: "agent", name: "outsider" });
   s.createContext({ id: "case-i", kind: "case", title: "i", goal: "i", createdAt: Date.now() }, "human:alice");
-  s.join({ contextId: "case-i", actorId: "agent:scout", capabilities: ["read", "write"], joinedAt: Date.now() }, "j");
+  s.join({ contextId: "case-i", actorId: "agent:scout", capabilities: ["read", "write"], joinedAt: Date.now() }, "j", "human:alice");
   s.requestAssistance("case-i", "agent:scout", "q1", "agent:expert", "help?", {});
   s.upsertActor({ id: "agent:expert", kind: "agent", name: "expert" });
   s.answerAssistance("case-i", "agent:expert", "a1", "q1", "yes", ["e"]);
@@ -76,7 +76,7 @@ test("non-member cannot write; events are append-only", () => {
   s.upsertActor({ id: "human:alice", kind: "human", name: "alice" });
   s.upsertActor({ id: "agent:stranger", kind: "agent", name: "stranger" });
   s.createContext({ id: "case-x", kind: "case", title: "x", goal: "x", createdAt: Date.now() }, "human:alice");
-  s.join({ contextId: "case-x", actorId: "human:alice", capabilities: ["read", "write", "decide"], joinedAt: Date.now() }, "j1");
+  s.join({ contextId: "case-x", actorId: "human:alice", capabilities: ["read", "write", "decide"], joinedAt: Date.now() }, "j1", "human:alice");
   assert.throws(() => s.postMessage("case-x", "agent:stranger", "k", "hi"), /not-a-member/);
   assert.throws(() => (s.db.exec(`UPDATE events SET type='hacked'`), null), /append-only/);
   s.close();

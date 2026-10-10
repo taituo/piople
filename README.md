@@ -1,123 +1,64 @@
-# piople — protocol first
+# piople — protocol core
 
-Multi-agent + multi-user collaboration core. Pi runs agents; piople owns the shared protocol.
-OptChat comes last. Order so far: synthetic world → real models → read-only tools → gated writes.
+Multi-agent + multi-user collaboration core, cut down to the protocol and two
+process-level faces: a **CLI** and an **MCP stdio server**. No runtime
+dependencies — Node ≥ 22.19 (`node:sqlite`, `node:test`, native `.ts`).
 
-Four concepts: `Actor`, `Context` (kind=case), `Event` (append-only), `Artifact`.
-Events today: `context.created, member.joined, message.posted, observation.recorded,
-assistance.requested/answered, decision.requested/resolved, action.proposed/executed`.
+Agents, model gateway, kubectl tools, executor, HTTP server and runner scripts
+were removed; the full history up to `c5a5b16` stays in git.
 
-## Current state
+## Concepts
+
+`Actor` (`human:*` / `agent:*`), `Context` (kind=case), `Event` (append-only), `Artifact`.
+Events: `context.created, member.joined, message.posted, observation.recorded,
+observation.promoted, assistance.requested/answered, decision.requested/resolved,
+action.proposed/executed, presence.changed`.
 
 ```
-src/core/    Store (SQLite, migrations), types — imports only itself + node:*
-src/agents/  loop.ts (turn: read context → gateway → write back),
-             tools.ts (read-only kubectl allowlist), executor.ts (gated writes)
-src/http/    server.ts (node:http JSON + SSE, same rules as the core)
-test/        synthetic, tools (allowlist), approval (gate), runs (ledger)
-scripts/     run-case.ts — unified runner, see --help-ish args in file
-data/        live DBs; data/archive/ — frozen V1–V3 runs, keep readable, don't write
+src/core/      Store (SQLite, migrations) + types — imports only itself + node:*
+src/ops.ts     the one operation table; identity is fixed by the process, never an argument
+src/cli/       one process = one op, JSON on stdout
+src/mcp/       stdio JSON-RPC; same ops as tools piople_<op>
+test/          core rules in-process; CLI+MCP as real processes on one DB file
 ```
 
-Needs Node >= 22.19 (`/opt/opencode-go-node/bin` on this host).
+## Use
 
 ```sh
-npm install
-npm test && npm run typecheck
-node scripts/run-case.ts --db ./data/case.sqlite --case case-checkout-2 --rounds 3
-PIO_PORT=8899 PIO_DATA=./data/piople.sqlite node src/http/server.ts
+npm install && npm test && npm run typecheck
+
+alias piople='node --no-warnings src/cli/main.ts --db ./data/p.sqlite'
+piople --as human:alice actor
+piople --as human:alice create --id c1 --title "Checkout down" --goal "find cause"
+piople --as human:alice join --context c1 --actor agent:scout --caps read,write
+piople --as agent:scout observe --context c1 --text "POOL_SIZE=0" --evidence k8s:cm/checkout
+piople --as agent:scout decision-request --context c1 --id d1 --question "Patch to 10?"
+piople --as human:alice decide --context c1 --decision d1 --answer yes
+piople --as human:alice events --context c1
+piople help
+
+# MCP (e.g. from an agent host): identity comes from the env the host sets
+PIO_DATA=./data/p.sqlite PIO_ACTOR=agent:scout node --no-warnings src/mcp/server.ts
 ```
 
-Models via host gateway `http://10.91.1.1:8788/v1` (bearer `gateway-bearer`,
-27 models, `x-session-id` per conversation). Default cheap `deepseek-v4-flash`,
-harder calls `gpt-5.6-luna`. Every run lands in the `runs` table
-(model, tokens in/out, tool calls, proposals, outcome) — that table, not the
-console log, is the history.
+## Rules (enforced in Store, so identical for CLI and MCP)
 
-Rules: membership + capability checked at the boundary (`read|write|decide`);
-every mutation takes an idempotency `key`, replays return the original event;
-`events` append-only (triggers); creator auto-joins; proposals never execute —
-`executor.ts` runs only on decision `yes` AND `PIO_ALLOW_WRITE=1`, and records
-every refusal. Identity header `x-piople-actor` is trusted dev-only
-(`PIO_TEST_USER`); verified identity is phase E work.
+- Membership + capability (`read|write|decide`) checked on every op.
+- **Joining is granted, not taken**: the granter needs `decide` and cannot hand
+  out capabilities it does not hold. The creator starts with all three.
+- Every mutation has an idempotency `key`; a replay returns the original event.
+- `events` is append-only (SQLite triggers).
+- Proposals never execute; a decision binds them. Echo delegates (away human)
+  may answer but never decide. Invited experts may answer without membership.
 
-## History (frozen, DBs in data/archive/)
+## Toward distribution (not built)
 
-- **V0**: synthetic 2+2 world, no model. HTTP smoke incl. same-key replay + restart persistence.
-- **V1**: two gateway agents, checkout-api restart crash. Without evidence both
-  refused to invent a cause. Found live: `observation.recorded` hid content
-  (TR-context-loss) → event now carries `text`+`evidence`. With human-posted
-  evidence: exact fix proposed (~1.4k+1.2k tokens).
-- **V2**: read-only kubectl allowlist; agents fetched `POOL_SIZE=0` themselves,
-  converged on the fix with zero human evidence (~5.3k+2.3k tokens).
-- **V3**: `PROPOSE:` → proposal + bound decision; 4 proposals
-  (`patch checkout-config POOL_SIZE→10`); gate verified refused while open.
-  **Not applied — awaiting human approval.**
-- **A**: git history from here; unified `run-case.ts`; `runs` ledger;
-  `turn:` key prefix. No model calls spent in A.
-
-## Next (B) — DONE: Pi owns transport
-
-- `src/agents/pi-provider.ts`: pi-ai `local`-provider on the same gateway
-  (pinned `@earendil-works/pi-ai@1.0.4`, like Entropi). `loop.ts` `chat()`
-  goes through `models.completeSimple`; raw `fetch` path deleted.
-- Three pi-ai 1.0.4 quirks found by bisecting and worked around in our layer:
-  `sanitize()` strips model control-token leakage (`<ds_s>`) before parsing;
-  assistant messages sent as `[{type:"text",text}]` blocks (string form
-  crashes the converter); `timestamp` omitted (breaks request building).
-- Proof: `case-pi-1`, 2 rounds, `deepseek-v4-flash` — 9 tool calls,
-  3 well-formed `patch checkout-config POOL_SIZE→10` proposals with bound
-  decisions, ledger row `4071+2067` tokens. Tests 7/7, `tsc` clean.
-- **H (Durable conversations)**: `src/agents/durable.ts` — one persistent Pi
-  conversation per (context, actor) on `openNodeSqliteStorage`, binding in
-  `pi_convs` (migration 3). `run-case.ts --durable` sends only the newest
-  user message per round; Pi holds the history. Restart proof
-  (`scripts/restart-proof.ts`): full close+reopen → same conv id, same
-  requestId resubmits without duplicating work (now returns the original
-  reply), `JUNIPER` remembered across restart, protocol events intact.
-  Full durable run `case-full-1`: 6 tool calls, 2 proposals.
-  Lesson: durable convs need the FULL system text at creation
-  (`fullSystem()`); bare role prompts drift into meta-chat with zero tool use.
-- **Second intent, same core**: `case-review-1` — reviewer+scout reviewed
-  `durable.ts`/`loop.ts` via new `repo` read-only tool (roots pinned, escapes
-  tested). Reviewer read real code, flagged a real uncertainty, noted its own
-  truncation limit. No core changes needed for a new domain.
-- **ask_expert** (`scripts/ask-expert.ts`): scout in checkout case consulted
-  reviewer in review case. Bounded snapshot over, answer with provenance back.
-  Expert explicitly could not see the other history — isolation holds.
-  Protocol: invited experts may answer without membership
-  (`isInvitedExpert`), strangers still blocked (tested).
-- **E (identity + presence)**: `PIO_AUTH_MODE=proxy` — identity only from
-  `x-piople-actor`, body spoof rejected (`test/auth.test.ts` spawns the
-  server in both modes). `presence` (migration 4, global per actor):
-  echo delegates may answer but never decide (enforced in
-  `resolveDecision`, live-verified: alice away+echo → blocked, bob decided).
-  `observation.promoted` moves hypothesis→confirmed/refuted with provenance.
-  Live E3 (alice+bob+scout, no model cost): 10 events, all gates held.
-  Tests 12/12.
-
-## C — DONE: first measured world effect (2026-10-09)
-
-- Operator instruction `tee kaikki` taken as approval for the demo-namespace fix.
-- Copied `case-full-1` out of archive, resolved its first proposal's decision
-  `yes` as human:alice, ran `executeIfApproved` with `PIO_ALLOW_WRITE=1`:
-  `configmap/checkout-config patched` (`0→10`).
-- Operator (outside the gate, logged): `rollout restart`, `rollout status`
-  successful, new pod Running, logs `database pool ready: 10 connections`.
-- Verification + proposal promotion recorded back in the case (18 events).
-- Revert if ever needed: patch `POOL_SIZE` back, rollout restart.
-
-## F — DONE (minimal): case brief
-
-- `scripts/brief-case.ts`: compacts a context's log into a `result` artifact
-  (TAVOITE/VAHVISTETTU/AVOINNA/PÄÄTÖKSET) with event-count provenance.
-  Live brief of `case-full-1` was honest about disagreements and missing logs.
-- Full OptChat deferred: briefs + digests cover current history sizes.
-
-## G — DONE (minimal): MCP stdio
-
-- `src/mcp/server.ts`: dependency-free JSON-RPC stdio, tools
-  `piople_events/post/observe/answer` on the same Store rules.
-  Identity from env `PIO_MCP_ACTOR` (no spoof arg); non-member reads rejected.
-  Live-smoked incl. the stranger case. Slack/Teams need credentials we don't
-  have — left out deliberately.
+The core is already shaped for it: events are keyed per `(context, key)`, so
+appending the same event twice is a no-op, and readers page by `seq`. The
+natural next step is **joining across runtimes**: a remote runtime gets
+`member.joined` granted by a local `decide` holder, then syncs a context by
+pulling `events --after <seq>` and pushing its own keyed events, which the
+owning runtime re-checks with the same Store rules. Open questions before
+building it: verified actor identity (signatures instead of a trusted
+`--as`), which runtime owns a context's ordering, and whether `seq` stays
+local with a per-origin cursor.

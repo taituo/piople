@@ -29,7 +29,8 @@ CREATE TABLE decisions (
   status TEXT NOT NULL, created_at INTEGER NOT NULL, resolved_at INTEGER);
 CREATE INDEX decisions_ctx ON decisions(context_id, status);
 `,
-  // Migration 2: run ledger. One row per runner invocation; outcome is free text.
+  // Migrations 2–3 are kept only so existing DBs keep migrating; runs/pi_convs are unused by the core.
+  // Migration 2: run ledger.
   `
 CREATE TABLE runs (
   id TEXT PRIMARY KEY, case_id TEXT NOT NULL, model TEXT NOT NULL,
@@ -91,11 +92,21 @@ export class Store {
     return this.append({ type: "context.created", contextId: c.id, actorId: by, key: `create:${c.id}`, data: { title: c.title } });
   }
 
-  join(m: Membership, key: string): PiopleEvent {
+  /**
+   * Joining is granted, never taken: `by` must be a member with `decide`,
+   * and may not hand out capabilities it does not hold itself.
+   */
+  join(m: Membership, key: string, by: Id): PiopleEvent {
+    this.mustMember(m.contextId, by, "decide");
+    const own = JSON.parse((this.db.prepare(`SELECT capabilities FROM members WHERE context_id=? AND actor_id=?`).get(m.contextId, by) as { capabilities: string }).capabilities) as string[];
+    const extra = m.capabilities.filter((c) => !own.includes(c));
+    if (extra.length) throw new Error(`forbidden: ${by} cannot grant ${extra.join(",")}`);
+    // The joiner may be known only by id (e.g. from another runtime); register it without renaming.
+    this.db.prepare(`INSERT INTO actors(id,kind,name) VALUES(?,?,?) ON CONFLICT(id) DO NOTHING`).run(m.actorId, m.actorId.startsWith("human:") ? "human" : "agent", m.actorId);
     this.db.prepare(`INSERT INTO members(context_id,actor_id,capabilities,joined_at) VALUES(?,?,?,?) ON CONFLICT(context_id,actor_id) DO UPDATE SET capabilities=excluded.capabilities`).run(
       m.contextId, m.actorId, JSON.stringify(m.capabilities), m.joinedAt,
     );
-    return this.append({ type: "member.joined", contextId: m.contextId, actorId: m.actorId, key, data: { capabilities: m.capabilities } });
+    return this.append({ type: "member.joined", contextId: m.contextId, actorId: m.actorId, key, data: { capabilities: m.capabilities, by } });
   }
 
   postMessage(contextId: Id, actorId: Id, key: string, text: string): PiopleEvent {
@@ -158,24 +169,6 @@ export class Store {
 
   getDecision(contextId: Id, decisionId: Id): { status: string; answer: string | null } | undefined {
     return this.db.prepare(`SELECT status, answer FROM decisions WHERE id=? AND context_id=?`).get(decisionId, contextId) as { status: string; answer: string | null } | undefined;
-  }
-
-  startRun(id: string, caseId: string, model: string, rounds: number): void {
-    this.db.prepare(`INSERT INTO runs(id,case_id,model,started_at,rounds) VALUES(?,?,?,?,?)`).run(id, caseId, model, Date.now(), rounds);
-  }
-
-  finishRun(id: string, r: { tokensIn: number; tokensOut: number; toolCalls: number; proposals: number; outcome: string }): void {
-    const info = this.db.prepare(`UPDATE runs SET finished_at=?,tokens_in=?,tokens_out=?,tool_calls=?,proposals=?,outcome=? WHERE id=?`).run(
-      Date.now(), r.tokensIn, r.tokensOut, r.toolCalls, r.proposals, r.outcome, id,
-    );
-    if (info.changes !== 1) throw new Error(`run-not-found: ${id}`);
-  }
-
-  listRuns(caseId?: string): Array<Record<string, unknown>> {
-    const rows = caseId
-      ? this.db.prepare(`SELECT * FROM runs WHERE case_id=? ORDER BY started_at`).all(caseId)
-      : this.db.prepare(`SELECT * FROM runs ORDER BY started_at`).all();
-    return rows as Array<Record<string, unknown>>;
   }
 
   resolveDecision(contextId: Id, actorId: Id, key: string, decisionId: Id, answer: string): PiopleEvent {

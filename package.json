@@ -7,17 +7,16 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "start": "node src/http/server.ts",
+    "cli": "node src/cli/main.ts",
+    "mcp": "node src/mcp/server.ts",
     "typecheck": "tsc -p .",
     "test": "node --test test/*.test.ts"
-  },
-  "dependencies": {
-    "@earendil-works/chord": "^1.0.4",
-    "@earendil-works/pi-ai": "^1.0.4",
-    "@earendil-works/pi-durable": "^1.0.4"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
     "typescript": "^5.9.3"
+  },
+  "bin": {
+    "piople": "src/cli/main.ts"
   }
 }
