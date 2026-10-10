@@ -140,6 +140,13 @@ export const OPS: Record<string, Op> = {
   },
 };
 
+/**
+ * Ops whose server-side default idempotency key is random. A caller that may retry (a network
+ * client) must fix a key before the first attempt, or a lost response would turn into a duplicate.
+ * Other keyed ops (decide, join, ...) have deterministic defaults and are replay-safe as they are.
+ */
+export const RANDOM_KEY_OPS: ReadonlySet<string> = new Set(["post", "ask", "answer", "presence"]);
+
 export function runOp(s: Store, as: string, name: string, a: Args): unknown {
   const op = OPS[name];
   if (!op) throw new Error(`unknown-op: ${name}`);

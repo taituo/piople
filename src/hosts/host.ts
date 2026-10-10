@@ -62,6 +62,7 @@ export class Host {
     if (!e) throw new Error(`not-hosted: ${actor}`);
     const first = !e.recovered;
     let steps = 0;
+    let stepFailed = false;
     const summary = (await this.core.call(actor, "inbox")) as InboxSummary[];
     for (const s of summary) {
       if (s.unread === 0 && !(first && s.pending > 0)) continue;
@@ -72,6 +73,7 @@ export class Host {
         e.failures = 0;
       } catch (error) {
         e.failures++;
+        stepFailed = true;
         this.onError({ actor, context: s.context, error });
         continue; // no ack: the same events are delivered again
       }
@@ -85,6 +87,7 @@ export class Host {
       }
     }
     e.recovered = true;
+    if (!stepFailed) e.failures = 0;
     return steps;
   }
 
@@ -131,6 +134,7 @@ export class Host {
       try {
         didWork = await this.pump(e.actor);
       } catch (error) {
+        e.failures++; // the core is unreachable or refused us: back off, then pick up from the cursor
         this.onError({ actor: e.actor, context: "*", error });
       }
       const wait = e.failures > 0 ? Math.min(base * 2 ** e.failures, 30_000) : didWork ? 0 : base;

@@ -10,7 +10,9 @@
     "cli": "node src/cli/main.ts",
     "mcp": "node src/mcp/server.ts",
     "typecheck": "tsc -p .",
-    "test": "node --test test/*.test.ts"
+    "test": "node --test test/*.test.ts",
+    "serve": "node src/http/main.ts",
+    "admin": "node src/cli/admin.ts"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",

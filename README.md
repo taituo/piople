@@ -22,7 +22,8 @@ src/core/      Store (SQLite, migrations) + types — imports only itself + node
 src/ops.ts     the one operation table; identity is fixed by the process, never an argument
 src/cli/       one process = one op, JSON on stdout
 src/mcp/       stdio JSON-RPC; same ops as tools piople_<op>
-src/hosts/     Harness contract + Host: one process, many participants, each its own actor
+src/http/      Core over HTTP: POST /v1/ops/<op>, identity = bearer token
+src/hosts/     Harness contract + Host (+ HttpCore client): many participants per process
 src/harnesses/ synthetic.ts (no model) and pi.ts (the only file that imports Pi)
 test/          core rules in-process; CLI+MCP+Host as real processes; boundary tests
 ```
@@ -142,14 +143,43 @@ Not yet: a continuously-running human harness (a human uses the CLI, which is a
 short-lived participant), environments (tools/filesystem/network per harness), and
 anything over a network — `CoreClient` is the seam for that (phase D).
 
-## Toward distribution (not built)
+## Across processes and machines
 
-The core is already shaped for it: events are keyed per `(context, key)`, so
-appending the same event twice is a no-op, and readers page by `seq`. The
-natural next step is **joining across runtimes**: a remote runtime gets
-`member.joined` granted by a local `decide` holder, then syncs a context by
-pulling `events --after <seq>` and pushing its own keyed events, which the
-owning runtime re-checks with the same Store rules. Open questions before
-building it: verified actor identity (signatures instead of a trusted
-`--as`), which runtime owns a context's ordering, and whether `seq` stays
-local with a per-origin cursor.
+```sh
+# operator, next to the database: one credential per actor (shown once, stored hashed)
+node src/cli/admin.ts --db ./data/p.sqlite issue-token --actor agent:fetch
+node src/cli/admin.ts --db ./data/p.sqlite revoke-tokens --actor agent:fetch
+
+PIO_DATA=./data/p.sqlite PIO_PORT=8899 node src/http/main.ts      # binds 127.0.0.1 by default
+```
+
+```ts
+// anywhere that can reach it; same Host, same harnesses
+const core = new HttpCore("http://core:8899", { "agent:fetch": tokenA, "agent:review": tokenB });
+const host = new Host(core);
+```
+
+- **Identity is the token and nothing else.** The server derives the actor from the bearer
+  token; no argument can name another caller. A host that serves several actors holds one
+  token per actor and can speak only as those. Tokens are stored as SHA-256 hashes, can be
+  revoked, and are minted only by the operator (not an op, not an event).
+- **Membership and capabilities are unchanged**: the same Store rules judge HTTP calls as
+  CLI and MCP calls. A valid token buys identity, not power.
+- **Reconnecting resumes from the cursor.** Cursors, open asks/decisions and held work live
+  in Core, so a host that was away, killed or replaced by a process on another machine picks
+  up where its actor left off. A replacement holding the same credential *is* that actor.
+- **Retries are safe.** `HttpCore` fixes an idempotency key/id before the first attempt, so
+  a lost response replays on the server instead of duplicating. `work-claim --next` is the one
+  op never retried blindly; a lost claim shows up under `work.mine` and is resumed.
+- Status codes: 401 no/bad token, 403 not allowed, 404 unknown op, 409 conflict (key reused,
+  stale claim, not open), 400 bad request, 413 too large.
+- **Plain HTTP.** A bearer token is a password: terminate TLS in front (ingress, proxy), keep
+  the port off the open internet. There is no push channel yet; hosts poll their inbox.
+- Not in this phase: signature-based identity, multi-node Core, rate limiting, long-poll/SSE.
+
+## Not built yet
+
+- Per-harness **environments** (filesystem, network, tools) and their enforcement at the OS/container level.
+- A continuously running **human harness** (a human uses the CLI, a short-lived participant).
+- **Kubernetes / Temporal** adapters.
+- Push delivery (SSE/long-poll), signature-based identity, a multi-node Core.

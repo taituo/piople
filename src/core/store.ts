@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import type { Actor, Artifact, Context, Decision, EventType, Id, Membership, PiopleEvent, WorkItem } from "./types.ts";
 import { EVENT_TYPES } from "./types.ts";
@@ -72,6 +72,13 @@ CREATE TABLE work (
   PRIMARY KEY (context_id, id));
 CREATE INDEX work_status ON work(context_id, status);
 `,
+  // Migration 7: actor credentials. Only a hash is stored; a token names exactly one actor.
+  `
+CREATE TABLE tokens (
+  hash TEXT PRIMARY KEY, actor_id TEXT NOT NULL REFERENCES actors(id),
+  created_at INTEGER NOT NULL, revoked_at INTEGER);
+CREATE INDEX tokens_actor ON tokens(actor_id);
+`,
 ];
 
 export type InboxSummary = { context: Id; title: string; cursor: number; unread: number; pending: number };
@@ -108,6 +115,8 @@ type Mutation = {
   /** Side-table writes; returns the event data. Skipped when the key was already used. */
   write?: () => Record<string, unknown>;
 };
+
+const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
 
 export class Store {
   readonly db: DatabaseSync;
@@ -572,6 +581,32 @@ export class Store {
     this.mustMember(contextId, actorId, "read");
     const cursor = this.cursor(contextId, actorId);
     return { context: contextId, cursor, events: this.eventsSince(contextId, cursor, limit), pending: this.pending(contextId, actorId) };
+  }
+
+  /**
+   * Operator-side: mint a credential for one actor (registering the actor if new). The token is
+   * returned once and never stored; verification is by hash. A network host that serves several
+   * actors holds one token per actor, so it can speak only as the actors it was given.
+   */
+  issueToken(actorId: Id): string {
+    if (!/^(human|agent):\S+$/.test(actorId)) throw new Error(`bad-actor: ${actorId} (expected human:<name> or agent:<name>)`);
+    const token = `pio_${randomBytes(32).toString("base64url")}`;
+    this.tx(() => {
+      this.db.prepare(`INSERT INTO actors(id,kind,name) VALUES(?,?,?) ON CONFLICT(id) DO NOTHING`).run(actorId, actorId.startsWith("human:") ? "human" : "agent", actorId);
+      this.db.prepare(`INSERT INTO tokens(hash,actor_id,created_at) VALUES(?,?,?)`).run(hashToken(token), actorId, Date.now());
+    });
+    return token;
+  }
+
+  /** The actor a live token belongs to, or undefined. */
+  actorForToken(token: string): Id | undefined {
+    const r = this.db.prepare(`SELECT actor_id FROM tokens WHERE hash=? AND revoked_at IS NULL`).get(hashToken(token)) as { actor_id: string } | undefined;
+    return r?.actor_id;
+  }
+
+  /** Revoke every live token of an actor. Returns how many. */
+  revokeTokens(actorId: Id): number {
+    return Number(this.db.prepare(`UPDATE tokens SET revoked_at=? WHERE actor_id=? AND revoked_at IS NULL`).run(Date.now(), actorId).changes);
   }
 
   /** Unchecked read, for internal and test use. Actors go through readEvents. */

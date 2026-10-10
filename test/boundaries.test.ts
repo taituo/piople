@@ -19,7 +19,7 @@ test("src/core imports only itself and node:*", () => {
 });
 
 test("ops, hosts and the synthetic harness use no model or agent library", () => {
-  const targets = ["src/ops.ts", ...files("src/hosts"), ...files("src/cli"), ...files("src/mcp"), "src/harnesses/synthetic.ts"];
+  const targets = ["src/ops.ts", ...files("src/hosts"), ...files("src/cli"), ...files("src/mcp"), ...files("src/http"), "src/harnesses/synthetic.ts"];
   for (const f of targets) {
     for (const i of imports(f)) assert.ok(!i.startsWith("@") && !i.includes("harnesses/pi"), `${relative(".", f)} imports ${i}`);
   }
@@ -33,7 +33,7 @@ test("model libraries are confined to src/harnesses/pi.ts", () => {
 });
 
 test("nothing outside src/hosts and src/harnesses knows about harnesses", () => {
-  for (const f of [...files("src/core"), "src/ops.ts", ...files("src/cli"), ...files("src/mcp")]) {
+  for (const f of [...files("src/core"), "src/ops.ts", ...files("src/cli"), ...files("src/mcp"), ...files("src/http")]) {
     for (const i of imports(f)) assert.ok(!/hosts|harnesses/.test(i), `${relative(".", f)} imports ${i}`);
   }
 });
