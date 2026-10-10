@@ -1,0 +1,31 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Store } from "../src/core/index.ts";
+import { Host, LocalCore } from "../src/hosts/host.ts";
+import { PiHarness } from "../src/harnesses/pi.ts";
+import { fakeModel, lastUser } from "./fake-model.ts";
+
+test("approval: a tool call whose arguments are too long for a person to review is refused, not truncated or asked about", { timeout: 30_000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "piople-approval-"));
+  writeFileSync(join(root, "notes.txt"), "friday");
+  const store = new Store(":memory:");
+  const core = new LocalCore(store);
+  await core.call("human:alice", "create", { id: "c1", title: "t" });
+  await core.call("human:alice", "join", { context: "c1", actor: "agent:pi", caps: "read,write" });
+  const long = `${"a/".repeat(1500)}notes.txt`;
+  const model = await fakeModel((m, n) => (n === 1 ? `TOOL: read_file | ${JSON.stringify({ path: long })}` : /REFUSED TOOL read_file/.test(lastUser(m)) ? "POST: it was refused" : "NOOP"));
+  const host = new Host(core);
+  await host.add({ actor: "agent:pi", harness: await PiHarness.open({ actor: "agent:pi", dir: ":memory:", role: "r", provider: { baseUrl: model.baseUrl }, modelId: "fake-1", maxRounds: 4, environment: { name: "t", tools: ["read_file"], files: { root } }, approval: { tools: ["read_file"] } }) });
+  await core.call("human:alice", "post", { context: "c1", text: "read it" });
+  await host.settle();
+  assert.equal(store.eventsSince("c1", 0).filter((e) => e.type === "decision.requested").length, 0, "no question was opened for a call nobody could review");
+  const said = store.eventsSince("c1", 0).filter((e) => e.actorId === "agent:pi" && e.type === "message.posted").map((e) => e.data.text);
+  assert.deepEqual(said, ["it was refused"]);
+  assert.ok(model.requests.some((r) => /more than a person can review/.test(JSON.stringify(r))), "the agent was told why");
+  await host.close();
+  await model.close();
+  store.close();
+});

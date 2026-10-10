@@ -121,6 +121,9 @@ export function parseCommands(reply: string): Command[] {
 
 const brief = (d: Record<string, unknown>) => `${typeof d.decisionId === "string" ? `[${d.decisionId}] ` : ""}${String(d.text ?? d.question ?? d.answer ?? JSON.stringify(d))}`.slice(0, 400);
 
+/** The longest tool-call arguments a person is asked to approve (characters of the canonical JSON). */
+const MAX_APPROVAL_ARGS = 2000;
+
 /** JSON with sorted keys: the same arguments always give the same text, so the same approval. */
 function canonical(v: unknown): string {
   if (Array.isArray(v)) return `[${v.map(canonical).join(",")}]`;
@@ -330,10 +333,14 @@ export class PiHarness implements Harness {
     if (!this.o.approval?.tools.includes(name)) return null;
     const s = this.current;
     if (!s) return `${name} needs a person's approval and there is no case to ask in right now`;
-    const id = `tool-${createHash("sha256").update(`${name}\0${canonical(args)}`).digest("hex").slice(0, 20)}`;
+    // What the person is asked to approve is the exact call, so it must be reviewable in full: a question is a short text,
+    // and cutting the arguments would let part of the call go unseen. Larger calls are refused, not truncated.
+    const shown = canonical(args);
+    if (shown.length > MAX_APPROVAL_ARGS) return `the arguments of this ${name} call are ${shown.length} characters, more than a person can review (${MAX_APPROVAL_ARGS}): make a smaller call`;
+    const id = `tool-${createHash("sha256").update(`${name}\0${shown}`).digest("hex").slice(0, 20)}`;
     const d = await s.run<{ found: boolean; status?: string; answer?: string; decidedBy?: string }>("decision-get", { id });
     if (d.found && d.status === "resolved") return d.answer === "allow" ? null : `${d.decidedBy ?? "a person"} denied this call (decision ${id}): ${name} will not run`;
-    if (!d.found) await s.run("decision-request", { id, question: `Allow ${this.actor} to run ${name} ${canonical(args)}?`, options: "allow,deny" });
+    if (!d.found) await s.run("decision-request", { id, question: `Allow ${this.actor} to run ${name} ${shown}?`, options: "allow,deny" });
     return `approval needed: decision ${id} is waiting for a person to answer allow or deny. Do not retry yet; you will be told when it is resolved, then call again with the same arguments.`;
   }
 
