@@ -15,6 +15,8 @@ export type ClassifyInput = {
   /** Only what the sender may address. Realm descriptors when `stage` is "realm". */
   targets: ReadonlyArray<{ id: string; kind: string; title: string; realm: string | null; parent: string | null }>;
   stage: "targets" | "realm";
+  /** The last few messages of the conversation before this one, oldest first, without who wrote them: only whether the sender did (`own`). For replies that mean nothing alone. */
+  recent?: ReadonlyArray<{ own: boolean; text: string }>;
 };
 export type Classification = {
   /** One of the offered ids, or null when nothing fits. */
@@ -75,6 +77,11 @@ export type RouterOptions = {
   needsHumanAbove?: number;
   /** Attempts before a message the classifier keeps rejecting is left unresolved. Default 3. */
   maxAttempts?: number;
+  /**
+   * The messages that came before this one in the conversation (oldest first), for replies like "yes, do that".
+   * Give only what the sender may read: it is shown to the classifier, and to an external one it leaves the system.
+   */
+  recent?: (m: { sender: string; key: string }) => ReadonlyArray<{ own: boolean; text: string }>;
 };
 
 const clamp01 = (n: number) => n >= 0 && n <= 1;
@@ -84,7 +91,7 @@ const top = (p: Record<string, number>, n = 10) => Object.fromEntries(Object.ent
 type Stage = { stage: string; offered: number; choice: string | null; confidence: number };
 
 export class RouterHarness implements Harness {
-  private readonly o: Required<Omit<RouterOptions, "external" | "needsHumanAbove">> & Pick<RouterOptions, "external" | "needsHumanAbove">;
+  private readonly o: Required<Omit<RouterOptions, "external" | "needsHumanAbove" | "recent">> & Pick<RouterOptions, "external" | "needsHumanAbove" | "recent">;
   private readonly attempts = new Map<string, number>();
   constructor(o: RouterOptions) {
     if (!clamp01(o.minConfidence)) throw new Error("minConfidence must be between 0 and 1");
@@ -172,7 +179,7 @@ export class RouterHarness implements Harness {
   private async classify(api: PollApi, sub: Submission, targets: Target[], ref: { ingress: string; submitted: string }): Promise<Classification> {
     const stages: Stage[] = [];
     const ask = async (stage: ClassifyInput["stage"], offered: ClassifyInput["targets"]) => {
-      const c = await this.o.classifier.classify({ submission: `${sub.ingress}#${sub.key}`, text: sub.text, sender: sub.sender, hops: sub.hops, targets: offered, stage });
+      const c = await this.o.classifier.classify({ submission: `${sub.ingress}#${sub.key}`, text: sub.text, sender: sub.sender, hops: sub.hops, targets: offered, stage, ...(this.o.recent ? { recent: this.o.recent({ sender: sub.sender, key: sub.key }) } : {}) });
       stages.push({ stage, offered: offered.length, choice: c.choice, confidence: c.confidence });
       return c;
     };

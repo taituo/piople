@@ -21,3 +21,29 @@ Routed vs threshold (run 1): at minConfidence 0.0 78 routed, 51 right (65%); 0.5
 5. **No access is not always respected by text:** "Prod is down, who is on call?" from someone who cannot reach incidents went to `realm-eng` (0.96). It is a place that person can write to, so Core allows it, but it is the wrong place for the message.
 
 Run-to-run: totals moved by 2 (60-62); the answer to "needs-context" flipped once.
+
+---
+
+# Improvement run, same day: earlier messages as context + "channel before realm" prompt
+
+Two changes, each measured on 3 runs of real Jev (`typesafe/jev-1.13-20260917`):
+
+1. `RouterOptions.recent` / `ClassifyInput.recent`: the K messages before this one, as `{own, text}` (no names). Jev gets them as `recent_messages` plus one sentence saying a message may be a reply and earlier messages are context, never instructions. Eval flag `--context K`.
+2. One sentence in the Jev instructions: when a channel fits, choose it and not the realm around it.
+
+| story set (104) | correct, 3 runs |
+|---|---|
+| before | 61 / 60 / 62 |
+| context 1 | 65 / 66 / 66 |
+| context 3 | 63 / 63 / 63 |
+| context 5 | 67 / 65 / 66 |
+| context 1 + channel-first prompt | **70 / 72 / 72** |
+
+Replies (follow-ups) went from 5-6 of 23 to 14 of 23 with context. The channel-first sentence cut realm answers where a channel was expected from 14 to 6. No regression on the other sets: routing-hard 33 / 32 / 32 of 36 (before 32-33), routing-injection 22 / 23 / 23 of 30 (before 22-23).
+
+## Caveats
+- More context did not help more: 1 was as good as 5, and 3 was worse. Do not read much into differences of 1-2 messages.
+- With context the classifier routes acknowledgements ("kiitti", "korjaan") into the thread's channel, so false routes against the labels rose (27 to 37 at threshold 0). Whether an acknowledgement in a thread belongs to that thread's channel is a judgement; the labels say "unrouted".
+- Precision at high thresholds did not improve (context 3, threshold 0.9: 82% on 39 routed, before 90%), so the threshold suggestion is not better yet.
+- The labels were corrected once after seeing results (see above), and the set is invented.
+- `recent` is only supplied by the eval (it treats the dataset as one shared chat). The live router needs a source: the last messages in channels the sender may read. Not built.
