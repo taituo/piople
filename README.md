@@ -313,6 +313,9 @@ const host = new Host(core);
 
 ## Not built yet
 
+The plan for what remains, with what each item needs and the test that says it is done, is in [PLAN.md](PLAN.md).
+
+
 - Per-harness **environments** (filesystem, network, tools) and their enforcement at the OS/container level.
 - A continuously running **human harness** (a human uses the CLI, a short-lived participant).
 - **Kubernetes / Temporal** adapters.
