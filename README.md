@@ -333,7 +333,31 @@ deciding still needs `decide` (a `human:*` name grants nothing, and an agent wit
 same way). I/O goes through a `Console` interface (`scriptedConsole` in tests); the CLI one-shot commands are
 unchanged. The host takes the actor's lease, so one `watch` per person at a time.
 
-Not yet: environments (tools/filesystem/network per harness).
+### Environments (process level)
+
+What an agent can *do* is fixed by the **operator's profile** for it, never by what it declares or what Core stores:
+
+```ts
+await PiHarness.open({ /* ... */, environment: { name: "reader", tools: ["read_file", "list_dir"], files: { root: "/srv/docs" } } });
+```
+
+The agent calls `TOOL: <name> | <json>` (offered in its protocol only when it has a profile). Each call runs in its
+own child process (`src/harnesses/tools.ts`, tools in `src/tools/`):
+
+- **Node permission model**: read access only to the profile's directory and the tool's own code; no writes, no
+  child processes, no workers. Reads outside are stopped by the *runtime* (`ERR_ACCESS_DENIED`); a test drives a
+  naive tool with raw `fs` calls to prove it is not the tool's own checks doing the work.
+- **Empty environment**: the child gets only the profile's explicit `env`. The host's token and keys never reach a
+  tool, and tool output is all the model ever sees.
+- **Limits**: a time limit (default 10 s, then SIGKILL) and an output cap; every failure comes back to the agent as
+  `REFUSED TOOL ...` feedback, like a refused command. An agent without a profile has no tools whatever it writes.
+- **Known limits, pinned by tests**: the permission model does not restrict the **network** (a network profile
+  waits for containers / network policy), and it **follows a symlink inside the directory that points outside**; the
+  bundled tools close that with a realpath check, and a test fails if Node's behaviour changes. A harness that uses
+  tools should run in its own process; synthetic agents and humans may share one.
+- Checked with real models (`scripts/live-tools.ts`): an agent reads a runbook inside its directory and is refused
+  when asked for a file outside; the canary in that file never reached it.
+
 
 ### One host per actor
 
@@ -389,7 +413,7 @@ const host = new Host(core);
 
 ## Not built yet
 
-- Per-harness **environments** (filesystem, network, tools) and their enforcement at the OS/container level.
+- **Container-level environments** (network policy, per-pod secrets); the process-level file profile exists.
 - **Kubernetes / Temporal** adapters.
 - Push delivery (SSE/long-poll), signature-based identity, a multi-node Core.
 

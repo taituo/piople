@@ -8,6 +8,7 @@ import { Harness as PiRuntime, createRegistry, type Conversation } from "@earend
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { Harness, Step } from "../hosts/types.ts";
 import { CaseMemory, type MemEvent, type Summarizer } from "./memory.ts";
+import { describeTools, runTool, type EnvironmentProfile } from "./tools.ts";
 
 /**
  * A Pi-backed participant. The only file that imports Pi.
@@ -36,11 +37,17 @@ export type PiHarnessOptions = {
    * conversation per delivery; the memory is derived and lives beside it in `<actor>.memory.sqlite`.
    */
   memory?: { summarizer: Summarizer; k?: number; recent?: number; budgetTokens?: number };
+  /**
+   * What this agent may do beyond talking: the operator's profile (tools.ts). Tools run in confined child processes
+   * with an empty environment; the agent calls them with `TOOL: <name> | <json>` and a refusal comes back as feedback.
+   * Without a profile the agent has no tools, whatever it writes.
+   */
+  environment?: EnvironmentProfile;
 };
 
 const MEMORY_LINE = `ZOOM: <memory id>      (read the original lines behind a summary in the case memory)
 `;
-const protocol = (memory: boolean) => `You take part in a shared case with humans and other agents. You only act by writing command lines, one per line; anything else you write is ignored. Commands:
+const protocol = (memory: boolean, tools: string[]) => `You take part in a shared case with humans and other agents. You only act by writing command lines, one per line; anything else you write is ignored. Commands:
 POST: <message to everyone>
 OBSERVE: <finding, with its evidence>
 ASK: <actor id> | <question>
@@ -50,9 +57,9 @@ WORK: <skill> | <json input>      (or WORK: @<actor id> | <json input> to addres
 CLAIM: <work id>
 DONE: <work id> | <attempt> | <json result>
 FAIL: <work id> | <attempt> | <reason>
-${memory ? MEMORY_LINE : ""}Rules: the system tells you what is new and what is owed to you. WORK creates a NEW work item for someone else: never write WORK for work that already appears in the log (it is already requested; the item shown under "Owed to you" is yours to CLAIM, not to re-request). Do not invent facts or results; say what you do not know. Permissions are enforced by the system: if a command is refused you will be told, do not try to get around it. If nothing needs doing, reply NOOP. Keep replies short.`;
+${memory ? MEMORY_LINE : ""}${tools.length ? `TOOL: <name> | <json arguments>      (your tools, run for you in a confined sandbox:\n${tools.map((t) => `  ${t}`).join("\n")})\n` : ""}Rules: the system tells you what is new and what is owed to you. WORK creates a NEW work item for someone else: never write WORK for work that already appears in the log (it is already requested; the item shown under "Owed to you" is yours to CLAIM, not to re-request). Do not invent facts or results; say what you do not know. Permissions are enforced by the system: if a command is refused you will be told, do not try to get around it. If nothing needs doing, reply NOOP. Keep replies short.`;
 
-const CMD = /^\s*(POST|OBSERVE|ASK|ANSWER|DECIDE|WORK|CLAIM|DONE|FAIL|ZOOM):\s?(.*)$/;
+const CMD = /^\s*(POST|OBSERVE|ASK|ANSWER|DECIDE|WORK|CLAIM|DONE|FAIL|ZOOM|TOOL):\s?(.*)$/;
 
 /** Strip model control-token leakage (e.g. <ds_s>) before parsing. */
 export function sanitize(text: string): string {
@@ -200,6 +207,20 @@ export class PiHarness implements Harness {
     }
   }
 
+  private async tool(rest: string): Promise<string> {
+    const env = this.o.environment;
+    if (!env) return "REFUSED TOOL: this agent has no tools";
+    const bar = rest.indexOf("|");
+    const name = (bar < 0 ? rest : rest.slice(0, bar)).trim();
+    let args: unknown = {};
+    if (bar >= 0 && rest.slice(bar + 1).trim()) {
+      try { args = JSON.parse(rest.slice(bar + 1)); } catch { return `REFUSED TOOL ${name}: the arguments are not valid JSON`; }
+    }
+    const r = await runTool(env, name, args);
+    if (!r.ok) return `REFUSED TOOL ${name}: ${r.error}`;
+    return `Tool ${name} returned:\n${r.output.length > 6000 ? `${r.output.slice(0, 6000)}\n…(cut)` : r.output}`;
+  }
+
   private zoom(s: Step, id: string): string {
     if (!this.memory) return "REFUSED ZOOM: this agent has no case memory";
     const z = this.memory.zoom(s.context, id);
@@ -229,6 +250,7 @@ export class PiHarness implements Harness {
           return `Claimed ${r.work.id}, attempt ${r.work.attempt}. Input: ${JSON.stringify(r.work.input)}. Finish with DONE or FAIL using this attempt.`;
         }
         case "ZOOM": return this.zoom(s, parts[0] ?? "");
+        case "TOOL": return await this.tool(rest);
         case "DONE": await s.run("work-complete", { id: parts[0], attempt: parts[1], result: parts.slice(2).join(" | ") }); return null;
         case "FAIL": await s.run("work-fail", { id: parts[0], attempt: parts[1], reason: parts.slice(2).join(" | ") }); return null;
       }
@@ -246,7 +268,7 @@ export class PiHarness implements Harness {
     }
     const conv = await this.rt.createConversation({
       ownership: { kind: "ownerless" },
-      agent: { model: this.model, instructions: `${this.o.role}\n\nYou are ${this.actor}.\n\n${protocol(!!this.memory)}` },
+      agent: { model: this.model, instructions: `${this.o.role}\n\nYou are ${this.actor}.\n\n${protocol(!!this.memory, this.o.environment ? describeTools(this.o.environment) : [])}` },
     } as never, BACKGROUND_CONTEXT);
     this.map.prepare(`INSERT INTO convs(context_id,conv_id) VALUES(?,?) ON CONFLICT(context_id) DO UPDATE SET conv_id=excluded.conv_id`).run(contextId, Number(conv.id));
     return conv;
