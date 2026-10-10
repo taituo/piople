@@ -179,3 +179,23 @@ test("cli: a misspelt option is an error, not silently dropped (a claim must not
   assert.match(typo.stderr, /unknown option --lease-mz for work-claim/);
   assert.equal(JSON.parse(run("work-claim", "--context", "c1", "--id", "w1", "--lease-ms", "100").stdout).work.attempt, 1, "the right spelling works and the typo claimed nothing");
 });
+
+test("mcp: ping is answered with an empty result, and a tools/call without a name says so", async () => {
+  const p = spawn(process.execPath, ["--no-warnings", "src/mcp/server.ts"], { env: { ...process.env, PIO_DATA: db, PIO_ACTOR: "agent:scout" }, stdio: ["pipe", "pipe", "inherit"] });
+  const replies: Array<{ id: number | string | null; error?: { code: number; message: string }; result?: unknown }> = [];
+  let buf = "";
+  p.stdout.on("data", (d: Buffer) => {
+    buf += d.toString();
+    const lines = buf.split("\n");
+    buf = lines.pop() ?? "";
+    for (const l of lines) if (l.trim()) replies.push(JSON.parse(l));
+  });
+  for (const line of ['{"jsonrpc":"2.0","id":1,"method":"ping"}', '{"jsonrpc":"2.0","id":"p2","method":"ping","params":{}}', '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{}}', '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"nope"}}']) p.stdin.write(line + "\n");
+  p.stdin.end();
+  await new Promise((r) => p.on("close", r));
+  const by = (id: number | string) => replies.find((r) => r.id === id)!;
+  assert.deepEqual(by(1).result, {}, "ping");
+  assert.deepEqual(by("p2").result, {}, "the id comes back as it was sent");
+  assert.match(by(3).error!.message, /missing tool name/);
+  assert.match(by(4).error!.message, /unknown tool: nope/);
+});

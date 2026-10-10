@@ -63,10 +63,11 @@ async function handle(req: Req) {
   if (req.method === "initialize") {
     return ok(req.id, { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "piople", version: "0.0.1" } });
   }
+  if (req.method === "ping") return ok(req.id, {}); // required by the MCP spec: clients use it to check that the server is alive
   if (req.method === "tools/list") return ok(req.id, { tools: TOOLS });
   if (req.method === "tools/call") {
     const op = BY_TOOL.get(req.params?.name ?? "");
-    if (!op) return err(req.id, -32602, `unknown tool: ${req.params?.name}`);
+    if (!op) return err(req.id, -32602, typeof req.params?.name === "string" ? `unknown tool: ${req.params.name}` : "missing tool name (params.name)");
     try {
       const out = await call(op, req.params?.arguments ?? {});
       return ok(req.id, { content: [{ type: "text", text: JSON.stringify(out) }] });
