@@ -805,6 +805,24 @@ export class Store {
     return this.targets(sender);
   }
 
+  /**
+   * Router only: the last few messages before `before` (an event seq) in contexts the SENDER may read, oldest first,
+   * with their realm so the router can hold back what an external classifier may not see. For replies that mean
+   * nothing alone. Never reaches into a context the sender cannot read, and never into ingress contexts.
+   */
+  routeRecent(router: Id, sender: Id, before: number, limit = 3): Array<{ seq: number; context: Id; realm: Id | null; own: boolean; text: string }> {
+    this.mustRouter(router);
+    const n = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), 10) : 3;
+    const rows = this.db.prepare(`SELECT c.id FROM contexts c JOIN members m ON m.context_id=c.id WHERE m.actor_id=? AND c.kind<>'ingress'`).all(sender) as Array<{ id: string }>;
+    const readable = rows.map((r) => r.id).filter((id) => this.caps(id, sender)?.includes("read"));
+    if (!readable.length) return [];
+    const q = this.db.prepare(`SELECT seq, context_id, actor_id, data FROM events WHERE type='message.posted' AND seq<? AND context_id IN (${readable.map(() => "?").join(",")}) ORDER BY seq DESC LIMIT ?`);
+    const out = (q.all(Math.trunc(before), ...readable, n) as Array<{ seq: number; context_id: string; actor_id: string; data: string }>).map((r) => ({
+      seq: r.seq, context: r.context_id, realm: this.contextRow(r.context_id)?.realm_id ?? null, own: r.actor_id === sender, text: String((JSON.parse(r.data) as { text?: unknown }).text ?? ""),
+    }));
+    return out.reverse();
+  }
+
   /** Router only: record the classifier's assessment (audit and later re-testing). Not a decision. */
   routeClassified(router: Id, ingress: Id, submittedKey: string, data: Record<string, unknown>, tag?: string): PiopleEvent {
     return this.mutate({

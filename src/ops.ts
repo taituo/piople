@@ -153,6 +153,11 @@ export const OPS: Record<string, Op> = {
     required: ["sender"],
     run: (s, as, a) => s.routeTargets(as, str(a, "sender")),
   },
+  "route-recent": {
+    description: "Router only: the last messages before an event in contexts the sender may read (context for replies). Show a classifier only what its realm rules allow",
+    required: ["sender"], optional: ["before", "limit"],
+    run: (s, as, a) => s.routeRecent(as, str(a, "sender"), Number(a.before ?? Number.MAX_SAFE_INTEGER), Number(a.limit ?? 3)),
+  },
   "route-classified": {
     description: "Router only: record the classifier's assessment of a submitted message (JSON). Not a decision",
     required: ["ingress", "submitted", "data"], optional: ["tag"],
