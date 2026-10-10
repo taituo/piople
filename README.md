@@ -15,7 +15,8 @@ of the first version were removed; the full history up to `c5a5b16` stays in git
 `Actor` (`human:*` / `agent:*`), `Context` (kind=case), `Event` (append-only), `Artifact`.
 Events: `context.created, member.joined, message.posted, observation.recorded,
 observation.promoted, assistance.requested/answered, decision.requested/resolved,
-work.requested/claimed/completed/failed, action.proposed/executed, presence.changed`.
+work.requested/claimed/completed/failed, message.submitted, route.classified/resolved/shadowed/unresolved,
+action.proposed/executed, presence.changed`.
 
 ```
 src/core/      Store (SQLite, migrations) + types — imports only itself + node:*
@@ -123,11 +124,16 @@ A submitted message waits in its sender's own **ingress** (a context Core create
   nothing, and the message stays pending. A classifier suggests, Core decides.
 - **The classifier sees only what the sender may address** (`route-targets`), never anything else.
 - **Every decision is an event** in the sender's ingress: `route.classified` (classifier name and version,
-  rule version, mode, choice, confidence, top probabilities, stages), then exactly one of `route.resolved` or
-  `route.unresolved`. The sender can read them, so an uncertain message is not lost: it stays visible and the
-  sender can clarify with a new message.
-- **Shadow mode** (`mode: "shadow"`): the same decision is recorded (`route.resolved` with `delivered: false`)
-  but nothing is delivered. Start there, compare against what people actually chose, then enforce.
+  rule version, mode, choice, confidence, top probabilities, stages), then exactly one of `route.resolved`
+  (delivered), `route.shadowed` (shadow mode: valid, recorded, deliberately not delivered) or
+  `route.unresolved`. `resolved` therefore always means delivered. The sender can read them, so an uncertain
+  message is not lost: it stays visible and the sender can clarify with a new message.
+- **Shadow mode** (`mode: "shadow"`): the same decision is validated and recorded (`route.shadowed`) but
+  nothing is delivered. Start there, compare against what people actually chose, then enforce. Messages
+  submitted during the shadow period stay undelivered: they are not replayed when you switch to enforce.
+- **The queue is a table**: submissions waiting for a route are listed in `route_queue`, so polling costs
+  the queue, not the whole history. Keys starting `resolved:`, `shadowed:`, `unresolved:` or `classified:`
+  belong to the router and are refused on submit; ids starting `ingress:` are reserved for ingress contexts.
 - **No invented thresholds**: `minConfidence` is a required option; derive it from measured results.
 - **Loops are bounded**: `submit --after-context/--after-seq` chains hops (refused past 5); one actor may have
   at most 100 messages waiting. A participant that omits `--after` starts a new chain, so the cap is the backstop.
@@ -164,8 +170,11 @@ const router = new RouterHarness({
 - **Strict parsing**: a missing/unoffered choice, an incomplete or out-of-range distribution, or a wrong
   answer type is an error, never a guess. Where the confidence came from (`answer`, `providerMetadata`, or the
   chosen option's own probability) is recorded in `extras.confidenceSource`.
-- Errors never echo the request, the provider's body or the key; redirects are refused; 30 s timeout;
-  429/5xx leave messages pending and are retried.
+- Errors never echo the request, the provider's body or the key; redirects are refused; 30 s timeout.
+  Failures are classified (`ClassifierError`): *transient* (408, 429, 5xx, unreachable) and *config* (401,
+  402, 403, 404) leave every message pending and fail loudly, so a wrong key can never turn messages into
+  unresolved ones; *message* (other 4xx, an unusable answer) is retried `maxAttempts` times (default 3) and then
+  that one message is left unresolved (`classifier-error`) so it cannot hold up the queue.
 - `test/jev.test.ts` runs against a local stand-in endpoint. `test/jev.live.test.ts` calls the real one and is
   skipped unless `OPENROUTER_API_KEY` (or `JEV_API_KEY`) and `JEV_MODEL` are set.
 

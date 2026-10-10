@@ -1,3 +1,4 @@
+import { ClassifierError } from "./router.ts";
 import type { Classification, ClassifyInput, Classifier } from "./router.ts";
 
 /**
@@ -35,11 +36,11 @@ const HUMAN =
   "False when the message is a plain statement, question or task that others can handle on their own.";
 
 function obj(v: unknown, what: string): Record<string, unknown> {
-  if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error(`Invalid Jev response: ${what}`);
+  if (!v || typeof v !== "object" || Array.isArray(v)) throw new ClassifierError("message", `Invalid Jev response: ${what}`);
   return v as Record<string, unknown>;
 }
 function prob(v: unknown, what: string): number {
-  if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 1) throw new Error(`Invalid Jev response: ${what} is not a probability`);
+  if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 1) throw new ClassifierError("message", `Invalid Jev response: ${what} is not a probability`);
   return v;
 }
 
@@ -49,10 +50,10 @@ export function parseJev(body: unknown, labels: string[]): { choice: string; pro
   const answers = obj(root.answers, "answers");
   const target = obj(answers.target, "answers.target");
   const human = obj(answers.needs_human, "answers.needs_human");
-  if (target.type !== "choice" || typeof target.choice !== "string" || !labels.includes(target.choice)) throw new Error("Invalid Jev response: choice is missing or not one of the offered options");
-  if (human.type !== "noul") throw new Error("Invalid Jev response: needs_human is not a noul answer");
+  if (target.type !== "choice" || typeof target.choice !== "string" || !labels.includes(target.choice)) throw new ClassifierError("message", "Invalid Jev response: choice is missing or not one of the offered options");
+  if (human.type !== "noul") throw new ClassifierError("message", "Invalid Jev response: needs_human is not a noul answer");
   const dist = obj(target.probabilities, "answers.target.probabilities");
-  if (Object.keys(dist).length !== labels.length || labels.some((l) => !Object.hasOwn(dist, l))) throw new Error("Invalid Jev response: incomplete probability distribution");
+  if (Object.keys(dist).length !== labels.length || labels.some((l) => !Object.hasOwn(dist, l))) throw new ClassifierError("message", "Invalid Jev response: incomplete probability distribution");
   const probabilities = Object.fromEntries(labels.map((l) => [l, prob(dist[l], `probability of ${l}`)]));
   // Some gateways omit the native confidence; then the chosen option's own probability stands in, and we say so.
   const meta = root.providerMetadata as { typesafe?: { confidence?: { target?: number } } } | undefined;
@@ -85,14 +86,17 @@ export function jevClassifier(o: JevOptions): Classifier {
           body: JSON.stringify({ model: o.model, state: { message: input.text }, questions: { target: { type: "choice", instructions: INSTRUCTIONS, criteria }, needs_human: { type: "noul", instructions: HUMAN } } }),
         });
       } catch (e) {
-        throw new Error(`Jev unreachable (${e instanceof Error ? e.name : "error"})`); // never echo the request
+        throw new ClassifierError("transient", `Jev unreachable (${e instanceof Error ? e.name : "error"})`); // never echo the request
       }
       if (!response.ok) {
         await response.body?.cancel(); // provider error bodies can echo the request
-        const hint = response.status === 401 || response.status === 403 ? "check the key" : response.status === 402 ? "check the balance" : response.status === 404 ? "check the model id" : response.status === 429 || response.status >= 500 ? "busy or unavailable, will be retried" : "request rejected";
-        throw new Error(`Jev returned HTTP ${response.status} (${hint})`);
+        const st = response.status;
+        const config = st === 401 || st === 402 || st === 403 || st === 404;
+        const transient = st === 408 || st === 429 || st >= 500;
+        const hint = st === 401 || st === 403 ? "check the key" : st === 402 ? "check the balance" : st === 404 ? "check the model id" : transient ? "busy or unavailable, will be retried" : "request rejected";
+        throw new ClassifierError(config ? "config" : transient ? "transient" : "message", `Jev returned HTTP ${st} (${hint})`);
       }
-      const p = parseJev(await response.json().catch(() => { throw new Error("Invalid Jev response: not JSON"); }), labels);
+      const p = parseJev(await response.json().catch(() => { throw new ClassifierError("message", "Invalid Jev response: not JSON"); }), labels);
       return {
         choice: p.choice === NONE ? null : p.choice,
         probabilities: p.probabilities,

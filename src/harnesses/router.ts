@@ -7,6 +7,8 @@ import type { Submission, Target } from "../core/index.ts";
  * whatever it says, a message can only land where its sender could have written it.
  */
 export type ClassifyInput = {
+  /** Identifies the submission (never sent anywhere): lets callers attribute timings and errors to a message. */
+  submission?: string;
   text: string;
   sender: string;
   hops: number;
@@ -26,6 +28,20 @@ export type Classification = {
   /** Anything else worth keeping with the decision (urgency, purpose, ...). Recorded, never trusted. */
   extras?: Record<string, unknown>;
 };
+/**
+ * A classifier failure the router can act on. `transient`: retry later (outage, rate limit). `config`: the setup
+ * is wrong (bad key, wrong model): keep every message pending and fail loudly, never turn messages into
+ * unresolved ones. `message`: this particular message is rejected or answered unusably; after a few attempts it is
+ * left unresolved so it cannot hold up the queue.
+ */
+export class ClassifierError extends Error {
+  kind: "transient" | "config" | "message";
+  constructor(kind: ClassifierError["kind"], message: string) {
+    super(message);
+    this.kind = kind;
+  }
+}
+
 export interface Classifier {
   readonly name: string;
   /**
@@ -57,6 +73,8 @@ export type RouterOptions = {
   external?: { allowRealms: string[] };
   /** Leave a message unresolved when the classifier says a human is needed with at least this probability. Unset = never gate. */
   needsHumanAbove?: number;
+  /** Attempts before a message the classifier keeps rejecting is left unresolved. Default 3. */
+  maxAttempts?: number;
 };
 
 const clamp01 = (n: number) => n >= 0 && n <= 1;
@@ -67,10 +85,11 @@ type Stage = { stage: string; offered: number; choice: string | null; confidence
 
 export class RouterHarness implements Harness {
   private readonly o: Required<Omit<RouterOptions, "external" | "needsHumanAbove">> & Pick<RouterOptions, "external" | "needsHumanAbove">;
+  private readonly attempts = new Map<string, number>();
   constructor(o: RouterOptions) {
     if (!clamp01(o.minConfidence)) throw new Error("minConfidence must be between 0 and 1");
     if (o.needsHumanAbove !== undefined && !clamp01(o.needsHumanAbove)) throw new Error("needsHumanAbove must be between 0 and 1");
-    this.o = { maxOptions: 255, batch: 20, ...o };
+    this.o = { maxOptions: 255, batch: 20, maxAttempts: 3, ...o };
   }
 
   /** What the classifier may be shown. An external one sees only allowed realms; by default that is nothing. */
@@ -109,7 +128,26 @@ export class RouterHarness implements Harness {
     if (!targets.length) return void (await unresolved("no-permitted-targets")); // nothing was sent anywhere
 
     // A classification recorded before a crash is reused, not paid for twice.
-    const c = this.reusable(sub) ?? (await this.classify(api, sub, targets, ref));
+    let c: Classification | null = this.reusable(sub);
+    if (!c) {
+      try {
+        c = await this.classify(api, sub, targets, ref);
+        this.attempts.delete(`${sub.ingress}#${sub.key}`);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        if (/^too-many-options\b/.test(message)) return void (await unresolved("too-many-options", { message })); // permanent for this sender
+        if (e instanceof ClassifierError && e.kind === "message") {
+          const id = `${sub.ingress}#${sub.key}`;
+          const n = (this.attempts.get(id) ?? 0) + 1;
+          this.attempts.set(id, n);
+          if (n >= this.o.maxAttempts) {
+            this.attempts.delete(id);
+            return void (await unresolved("classifier-error", { message, attempts: n })); // it would hold up the queue forever
+          }
+        }
+        throw e; // transient or config: leave it pending
+      }
+    }
     const offered = new Set(targets.map((t) => t.id));
     if (c.choice === null) return void (await unresolved("no-choice", { confidence: c.confidence }));
     if (!offered.has(c.choice)) return void (await unresolved("invalid-choice", { choice: c.choice }));
@@ -134,7 +172,7 @@ export class RouterHarness implements Harness {
   private async classify(api: PollApi, sub: Submission, targets: Target[], ref: { ingress: string; submitted: string }): Promise<Classification> {
     const stages: Stage[] = [];
     const ask = async (stage: ClassifyInput["stage"], offered: ClassifyInput["targets"]) => {
-      const c = await this.o.classifier.classify({ text: sub.text, sender: sub.sender, hops: sub.hops, targets: offered, stage });
+      const c = await this.o.classifier.classify({ submission: `${sub.ingress}#${sub.key}`, text: sub.text, sender: sub.sender, hops: sub.hops, targets: offered, stage });
       stages.push({ stage, offered: offered.length, choice: c.choice, confidence: c.confidence });
       return c;
     };

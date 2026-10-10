@@ -16,7 +16,8 @@ export type ServerOptions = { maxBody?: number };
 
 const STATUS: Array<[RegExp, number, string]> = [
   [/^(forbidden|not-a-member|not-in-realm)\b/, 403, "forbidden"],
-  [/^(key-conflict|stale-claim|work-not-claimable|decision-not-open)\b/, 409, "conflict"],
+  [/^(key-conflict|stale-claim|work-not-claimable|decision-not-open|already-routed)\b/, 409, "conflict"],
+  [/^(hop-limit|too-many-pending)\b/, 429, "limit"],
   [/^(unknown-[a-z]+)\b/, 404, "not-found"],
   [/^(missing|bad-[a-z]+|work-needs-target)\b/, 400, "bad-request"],
 ];

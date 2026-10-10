@@ -104,3 +104,19 @@ test("CLI: prints the report; --json parses; jev needs its key, a pinned model a
   assert.match(spawnSync(process.execPath, ["--no-warnings", "src/eval/main.ts", "--classifier", "jev"], { encoding: "utf8", env: { ...env, JEV_API_KEY: "k", JEV_MODEL: "m" } }).stderr, /--send-to-external/);
   assert.match(run("--classifier", "nope").stderr, /unknown classifier/);
 });
+
+test("latency belongs to the right message even when two messages have the same text", async () => {
+  const d = dataset();
+  d.cases = [
+    { id: "s1", sender: "human:bob", text: "production outage", expect: "ch-incidents" },
+    { id: "s2", sender: "human:erin", text: "production outage", expect: "ch-incidents" },
+    { id: "s3", sender: "human:bob", text: "fast one", expect: null },
+  ];
+  const inner = keywordClassifier();
+  const classifier: Classifier = { name: "slow-for-bob", version: "1", async classify(i) { if (i.sender === "human:bob" && i.text === "production outage") await new Promise((r) => setTimeout(r, 60)); return inner.classify(i); } };
+  const run = await runRoutingEval(d, classifier);
+  const ms = Object.fromEntries(run.rows.map((r) => [r.id, r.latencyMs!]));
+  assert.ok(ms.s1! >= 50, `bob's slow call is bob's (${ms.s1})`);
+  assert.ok(ms.s2! < 40, `erin's identical text is not charged for it (${ms.s2})`);
+  assert.ok(ms.s3! < 40);
+});

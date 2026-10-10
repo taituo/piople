@@ -90,13 +90,21 @@ ALTER TABLE contexts ADD COLUMN realm_id TEXT REFERENCES contexts(id);
 ALTER TABLE contexts ADD COLUMN parent_id TEXT REFERENCES contexts(id);
 CREATE INDEX contexts_realm ON contexts(realm_id);
 `,
-  // Migration 10: routers (operator-designated actors that may route submitted messages) and an index by event type.
+  // Migration 10: routers (operator-designated actors that may route submitted messages), the queue of
+  // submissions still waiting for a route (so polling costs the queue, not the whole history), and indexes.
   `
 CREATE TABLE routers (actor_id TEXT PRIMARY KEY REFERENCES actors(id), created_at INTEGER NOT NULL);
+CREATE TABLE route_queue (ingress TEXT NOT NULL, key TEXT NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY (ingress, key));
+CREATE INDEX route_queue_seq ON route_queue(seq);
 CREATE INDEX events_type ON events(type, seq);
+CREATE INDEX events_submitted ON events(context_id, json_extract(data,'$.submittedKey'));
 `,
 ];
 
+/** Ingress contexts are named ingress:<actor>; Core alone creates them, so nobody can squat on another actor's. */
+const INGRESS_PREFIX = "ingress:";
+/** Event keys the router writes into an ingress; a submission may not use them. */
+const ROUTER_KEY = /^(resolved|shadowed|unresolved|classified):/;
 /** A routed chain of messages may not exceed this many hops (see submitMessage). */
 export const MAX_HOPS = 5;
 /** One actor may have at most this many submitted messages waiting for a route. */
@@ -260,6 +268,7 @@ export class Store {
   /** Where a new context sits, validated. A case under a channel lives in that channel's realm. */
   private placement(c: Context, by: Id): { realm: Id | null; parent: Id | null } {
     if (!CONTEXT_KINDS.includes(c.kind) || c.kind === "ingress") throw new Error(`bad-kind: ${c.kind} (case, channel or realm)`);
+    if (c.id.startsWith(INGRESS_PREFIX)) throw new Error(`bad-context: ids starting with ${INGRESS_PREFIX} are reserved for ingress contexts`);
     let realm = c.realmId ?? null;
     const parent = c.parentId ?? null;
     if (c.kind === "realm" && (realm || parent)) throw new Error(`bad-context: a realm has no realm or parent`);
@@ -631,11 +640,11 @@ export class Store {
   }
 
   private ingressOf(actorId: Id): Id {
-    return `ingress:${actorId}`;
+    return `${INGRESS_PREFIX}${actorId}`;
   }
 
   private terminalOf(ingress: Id, submittedKey: string): string | undefined {
-    return (this.db.prepare(`SELECT type FROM events WHERE context_id=? AND type IN ('route.resolved','route.unresolved') AND json_extract(data,'$.submittedKey')=? LIMIT 1`).get(ingress, submittedKey) as { type: string } | undefined)?.type;
+    return (this.db.prepare(`SELECT type FROM events WHERE context_id=? AND type IN ('route.resolved','route.shadowed','route.unresolved') AND json_extract(data,'$.submittedKey')=? LIMIT 1`).get(ingress, submittedKey) as { type: string } | undefined)?.type;
   }
 
   private submission(ingress: Id, key: string): { actor_id: string; seq: number; ts: number; data: { text: string; hops: number } } | undefined {
@@ -653,24 +662,36 @@ export class Store {
   submitMessage(actorId: Id, key: string, text: string, after?: { context: Id; seq: number }): PiopleEvent {
     const ingress = this.ingressOf(actorId);
     let hops = 0;
+    return this.tx(() => {
+      const ev = this.submitEvent(ingress, actorId, key, text, after, (h) => { hops = h; }, () => hops);
+      this.db.prepare(`INSERT INTO route_queue(ingress,key,seq) SELECT ?,?,? WHERE NOT EXISTS (SELECT 1 FROM events WHERE context_id=? AND type IN ('route.resolved','route.shadowed','route.unresolved') AND json_extract(data,'$.submittedKey')=?) ON CONFLICT DO NOTHING`).run(ingress, key, ev.seq, ingress, key);
+      return ev;
+    });
+  }
+
+  private submitEvent(ingress: Id, actorId: Id, key: string, text: string, after: { context: Id; seq: number } | undefined, setHops: (h: number) => void, getHops: () => number): PiopleEvent {
     return this.mutate({
       type: "message.submitted", contextId: ingress, actorId, key, replayFirst: true,
       check: () => {
         if (!text.trim()) throw new Error(`bad-message: empty text`);
-        const waiting = (this.db.prepare(`SELECT COUNT(*) n FROM events s WHERE s.context_id=? AND s.type='message.submitted' AND NOT EXISTS (SELECT 1 FROM events r WHERE r.context_id=s.context_id AND r.type IN ('route.resolved','route.unresolved') AND json_extract(r.data,'$.submittedKey')=s.key)`).get(ingress) as { n: number }).n;
+        if (ROUTER_KEY.test(key)) throw new Error(`bad-key: ${key} (keys starting resolved:, shadowed:, unresolved: or classified: are the router's)`);
+        const existing = this.contextRow(ingress);
+        if (existing && existing.kind !== "ingress") throw new Error(`bad-context: ${ingress} exists but is not an ingress`);
+        const waiting = (this.db.prepare(`SELECT COUNT(*) n FROM route_queue WHERE ingress=?`).get(ingress) as { n: number }).n;
         if (waiting >= MAX_PENDING_SUBMISSIONS) throw new Error(`too-many-pending: ${actorId} has ${waiting} messages waiting for a route`);
         if (after) {
           this.mustMember(after.context, actorId, "read");
           const prev = this.db.prepare(`SELECT data FROM events WHERE context_id=? AND seq=?`).get(after.context, after.seq) as { data: string } | undefined;
           if (!prev) throw new Error(`bad-after: no event ${after.context}#${after.seq}`);
-          hops = Number((JSON.parse(prev.data) as { hops?: number }).hops ?? 0) + 1;
+          const hops = Number((JSON.parse(prev.data) as { hops?: number }).hops ?? 0) + 1;
+          setHops(hops);
           if (hops > MAX_HOPS) throw new Error(`hop-limit: this chain has been routed ${MAX_HOPS} times already`);
         }
       },
       write: () => {
         this.db.prepare(`INSERT INTO contexts(id,kind,title,goal,created_at) VALUES(?,?,?,?,?) ON CONFLICT(id) DO NOTHING`).run(ingress, "ingress", `Ingress of ${actorId}`, "", Date.now());
         this.db.prepare(`INSERT INTO members(context_id,actor_id,capabilities,joined_at) VALUES(?,?,?,?) ON CONFLICT(context_id,actor_id) DO NOTHING`).run(ingress, actorId, JSON.stringify(["read", "write"]), Date.now());
-        return { text, hops, after: after ?? null };
+        return { text, hops: getHops(), after: after ?? null };
       },
     });
   }
@@ -679,9 +700,7 @@ export class Store {
   routePending(router: Id, limit = 50): Submission[] {
     this.mustRouter(router);
     const n = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), MAX_READ) : 50;
-    const rows = this.db.prepare(`SELECT s.context_id, s.actor_id, s.key, s.seq, s.ts, s.data FROM events s WHERE s.type='message.submitted'
-      AND NOT EXISTS (SELECT 1 FROM events r WHERE r.context_id=s.context_id AND r.type IN ('route.resolved','route.unresolved') AND json_extract(r.data,'$.submittedKey')=s.key)
-      ORDER BY s.seq LIMIT ?`).all(n) as Array<{ context_id: string; actor_id: string; key: string; seq: number; ts: number; data: string }>;
+    const rows = this.db.prepare(`SELECT q.ingress AS context_id, e.actor_id, q.key, q.seq, e.ts, e.data FROM route_queue q JOIN events e ON e.seq=q.seq ORDER BY q.seq LIMIT ?`).all(n) as Array<{ context_id: string; actor_id: string; key: string; seq: number; ts: number; data: string }>;
     return rows.map((r) => {
       const d = JSON.parse(r.data) as { text: string; hops: number };
       const c = this.db.prepare(`SELECT data FROM events WHERE context_id=? AND type='route.classified' AND json_extract(data,'$.submittedKey')=? ORDER BY seq DESC LIMIT 1`).get(r.context_id, r.key) as { data: string } | undefined;
@@ -716,47 +735,56 @@ export class Store {
    */
   routeResolve(router: Id, ingress: Id, submittedKey: string, choice: RouteChoice): PiopleEvent {
     this.mustRouter(router); // authorization first: replayFirst below must not answer anyone else
-    return this.mutate({
-      type: "route.resolved", contextId: ingress, actorId: router, key: `resolved:${submittedKey}`, replayFirst: true,
-      check: () => {
-        this.mustRouter(router);
-        if (!this.submission(ingress, submittedKey)) throw new Error(`unknown-submission: ${ingress} ${submittedKey}`);
-        if (this.terminalOf(ingress, submittedKey) === "route.unresolved") throw new Error(`already-routed: ${submittedKey} was left unresolved`);
-      },
-      write: () => {
-        const sub = this.submission(ingress, submittedKey)!;
-        const sender = sub.actor_id;
-        const target = choice.context;
-        const as = choice.as ?? "message";
-        if (as !== "message" && as !== "work") throw new Error(`bad-route: as must be message or work`);
-        if (this.contextRow(target)?.kind === "ingress") throw new Error(`bad-route: ${target} is not a destination`);
-        this.mustMember(target, sender, "write"); // the sender's authority decides, not the router's
-        const deliver = choice.deliver !== false;
-        let deliveredSeq: number | null = null;
-        if (deliver) {
-          const via = { via: "route", hops: sub.data.hops, submitted: { ingress, key: submittedKey } };
-          if (as === "work") {
-            deliveredSeq = this.requestWork(target, sender, { id: `route-${ingress}-${submittedKey}`.replace(/[^\w.-]/g, "-"), to: choice.to ?? null, skill: choice.skill ?? null, input: { text: sub.data.text, ...via } }).seq;
-          } else {
-            deliveredSeq = this.mutate({ type: "message.posted", contextId: target, actorId: sender, key: `route:${ingress}:${submittedKey}`, write: () => ({ text: sub.data.text, ...via }) }).seq;
+    const deliver = choice.deliver !== false;
+    const type = deliver ? "route.resolved" : "route.shadowed";
+    return this.tx(() => {
+      const ev = this.mutate({
+        type, contextId: ingress, actorId: router, key: `${deliver ? "resolved" : "shadowed"}:${submittedKey}`, replayFirst: true,
+        check: () => {
+          if (!this.submission(ingress, submittedKey)) throw new Error(`unknown-submission: ${ingress} ${submittedKey}`);
+          const ended = this.terminalOf(ingress, submittedKey);
+          if (ended && ended !== type) throw new Error(`already-routed: ${submittedKey} ended as ${ended}`);
+        },
+        write: () => {
+          const sub = this.submission(ingress, submittedKey)!;
+          const sender = sub.actor_id;
+          const target = choice.context;
+          const as = choice.as ?? "message";
+          if (as !== "message" && as !== "work") throw new Error(`bad-route: as must be message or work`);
+          if (this.contextRow(target)?.kind === "ingress") throw new Error(`bad-route: ${target} is not a destination`);
+          this.mustMember(target, sender, "write"); // the sender's authority decides, not the router's
+          let deliveredSeq: number | null = null;
+          if (deliver) {
+            const via = { via: "route", hops: sub.data.hops, submitted: { ingress, key: submittedKey } };
+            if (as === "work") {
+              deliveredSeq = this.requestWork(target, sender, { id: `route-${createHash("sha256").update(`${ingress}\0${submittedKey}`).digest("hex").slice(0, 32)}`, to: choice.to ?? null, skill: choice.skill ?? null, input: { text: sub.data.text, ...via } }).seq;
+            } else {
+              deliveredSeq = this.mutate({ type: "message.posted", contextId: target, actorId: sender, key: `route:${ingress}:${submittedKey}`, write: () => ({ text: sub.data.text, ...via }) }).seq;
+            }
           }
-        }
-        return { submittedKey, context: target, as, skill: choice.skill ?? null, to: choice.to ?? null, delivered: deliver, deliveredSeq, hops: sub.data.hops };
-      },
+          return { submittedKey, context: target, as, skill: choice.skill ?? null, to: choice.to ?? null, delivered: deliver, deliveredSeq, hops: sub.data.hops };
+        },
+      });
+      this.db.prepare(`DELETE FROM route_queue WHERE ingress=? AND key=?`).run(ingress, submittedKey);
+      return ev;
     });
   }
 
   /** Router only: the route stayed uncertain or invalid. The message remains in the sender's ingress, visible to the sender. */
   routeUnresolved(router: Id, ingress: Id, submittedKey: string, reason: string, data: Record<string, unknown> = {}): PiopleEvent {
     this.mustRouter(router);
-    return this.mutate({
-      type: "route.unresolved", contextId: ingress, actorId: router, key: `unresolved:${submittedKey}`, replayFirst: true,
-      check: () => {
-        this.mustRouter(router);
-        if (!this.submission(ingress, submittedKey)) throw new Error(`unknown-submission: ${ingress} ${submittedKey}`);
-        if (this.terminalOf(ingress, submittedKey) === "route.resolved") throw new Error(`already-routed: ${submittedKey} was resolved`);
-      },
-      write: () => ({ ...data, submittedKey, reason }),
+    return this.tx(() => {
+      const ev = this.mutate({
+        type: "route.unresolved", contextId: ingress, actorId: router, key: `unresolved:${submittedKey}`, replayFirst: true,
+        check: () => {
+          if (!this.submission(ingress, submittedKey)) throw new Error(`unknown-submission: ${ingress} ${submittedKey}`);
+          const ended = this.terminalOf(ingress, submittedKey);
+          if (ended && ended !== "route.unresolved") throw new Error(`already-routed: ${submittedKey} ended as ${ended}`);
+        },
+        write: () => ({ ...data, submittedKey, reason }),
+      });
+      this.db.prepare(`DELETE FROM route_queue WHERE ingress=? AND key=?`).run(ingress, submittedKey);
+      return ev;
     });
   }
 

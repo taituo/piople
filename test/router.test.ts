@@ -4,7 +4,7 @@ import { Store } from "../src/core/index.ts";
 import type { Context } from "../src/core/index.ts";
 import { Host, LocalCore } from "../src/hosts/host.ts";
 import type { CoreClient } from "../src/hosts/types.ts";
-import { RouterHarness, keywordClassifier } from "../src/harnesses/router.ts";
+import { ClassifierError, RouterHarness, keywordClassifier } from "../src/harnesses/router.ts";
 import type { Classification, ClassifyInput, Classifier } from "../src/harnesses/router.ts";
 
 const ctx = (id: string, kind: Context["kind"], title: string, extra: Partial<Context> = {}): Context => ({ id, kind, title, goal: "", createdAt: 1, ...extra });
@@ -80,7 +80,8 @@ test("shadow mode records what it would do and delivers nothing", async () => {
   store.submitMessage("human:bob", "a", "production servers outage again");
   await host.settle();
   assert.equal(posted(store, "ch-incidents").length, 0);
-  const r = ingress(store, "human:bob").find((e) => e.type === "route.resolved")!;
+  const r = ingress(store, "human:bob").find((e) => e.type === "route.shadowed")!;
+  assert.ok(!ingress(store, "human:bob").some((e) => e.type === "route.resolved"), "resolved always means delivered");
   assert.deepEqual([r.data.context, r.data.delivered, r.data.deliveredSeq], ["ch-incidents", false, null]);
   assert.equal(ingress(store, "human:bob").find((e) => e.type === "route.classified")!.data.mode, "shadow");
   store.close();
@@ -157,3 +158,30 @@ test("whatever the classifier says: an unoffered choice is unresolved, a skill a
   assert.equal(posted(store, "ch-incidents").length, 0, "asked for work instead of posting");
   store.close();
 });
+
+test("a message the classifier keeps rejecting is left unresolved after a few attempts and does not hold up the rest; a wrong setup resolves nothing", async () => {
+  const store = world();
+  const inner = keywordClassifier();
+  const classifier: Classifier = { name: "k", version: "1", async classify(i) { if (i.text.includes("poison")) throw new ClassifierError("message", "rejected"); return inner.classify(i); } };
+  const host = await hostWith(store, new RouterHarness({ classifier, mode: "enforce", minConfidence: 0.5, ruleVersion: "r1", maxAttempts: 3 }));
+  const errors: string[] = [];
+  host.onError = (e) => errors.push(String((e.error as Error).message));
+  store.submitMessage("human:bob", "p", "poison production outage");
+  store.submitMessage("human:bob", "a", "production servers outage again");
+  await host.settle();
+  assert.deepEqual(unresolvedOf(store), [["p", "classifier-error"]]);
+  assert.equal(posted(store, "ch-incidents").length, 1, "the healthy message was delivered");
+  assert.equal(errors.length, 2, "two failed passes, the third attempt gave up on it");
+
+  const config: Classifier = { name: "k", version: "2", async classify() { throw new ClassifierError("config", "bad key"); } };
+  const host2 = await hostWith(store, new RouterHarness({ classifier: config, mode: "enforce", minConfidence: 0.5, ruleVersion: "r1" }));
+  host2.onError = () => {};
+  store.submitMessage("human:bob", "b", "production servers outage again");
+  for (let i = 0; i < 6; i++) await host2.tick();
+  assert.equal(store.routePending(R).length, 1, "a configuration error never turns messages into unresolved ones");
+  assert.deepEqual(unresolvedOf(store), [["p", "classifier-error"]]);
+  store.close();
+});
+function unresolvedOf(s: Store) {
+  return s.eventsSince("ingress:human:bob", 0).filter((e) => e.type === "route.unresolved").map((e) => [e.data.submittedKey, e.data.reason]);
+}

@@ -59,6 +59,7 @@ export const EVENT_TYPES = [
   "message.submitted",
   "route.classified",
   "route.resolved",
+  "route.shadowed",
   "route.unresolved",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];

@@ -45,7 +45,7 @@ export async function runRoutingEval(dataset: EvalDataset, classifier: Classifie
     if (c.expect !== null && !addressable.has(c.expect)) throw new Error(`dataset-invalid: case ${c.id} expects ${c.expect}, which ${c.sender} cannot address`);
   }
 
-  const timings: Array<{ text: string; ms: number }> = [];
+  const timings = new Map<string, number>(); // summed per submission: a message may take two stages
   const timed: Classifier = {
     name: classifier.name, version: classifier.version, external: classifier.external,
     async classify(input) {
@@ -53,7 +53,7 @@ export async function runRoutingEval(dataset: EvalDataset, classifier: Classifie
       try {
         return await classifier.classify(input);
       } finally {
-        timings.push({ text: input.text, ms: performance.now() - t0 });
+        timings.set(input.submission!, (timings.get(input.submission!) ?? 0) + (performance.now() - t0));
       }
     },
   };
@@ -70,8 +70,8 @@ export async function runRoutingEval(dataset: EvalDataset, classifier: Classifie
     const events = store.eventsSince(`ingress:${c.sender}`, 0, 1000).filter((e) => e.data.submittedKey === c.id);
     const classified = events.filter((e) => e.type === "route.classified").at(-1);
     const unresolved = events.find((e) => e.type === "route.unresolved");
-    const idx = timings.findIndex((t) => t.text === c.text);
-    const latencyMs = idx >= 0 ? Math.round(timings.splice(idx, 1)[0]!.ms) : null;
+    const ms = timings.get(`ingress:${c.sender}#${c.id}`);
+    const latencyMs = ms === undefined ? null : Math.round(ms);
     const base = { id: c.id, sender: c.sender, expect: c.expect, tags: c.tags ?? [], latencyMs };
     if (classified) {
       const d = classified.data as { choice: string | null; confidence: number; extras?: { needsHuman?: number } | null };

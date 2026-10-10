@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { Store } from "../src/core/index.ts";
 import type { Context } from "../src/core/index.ts";
 import { Host, LocalCore } from "../src/hosts/host.ts";
-import { RouterHarness } from "../src/harnesses/router.ts";
+import { ClassifierError, RouterHarness } from "../src/harnesses/router.ts";
 import { NONE, jevClassifier, parseJev } from "../src/harnesses/jev.ts";
 import { answerFor, fakeJev } from "./fake-jev.ts";
 
@@ -182,6 +182,42 @@ test("a human is asked for only past a threshold the operator chose; an outage k
   assert.deepEqual(unresolved(store, "human:bob"), [["a", "needs-human"]]);
   assert.deepEqual(posted(store, "ch-incidents").map((e) => e.data.text), ["production servers keep crashing"]);
   assert.throws(() => router(1.5), /needsHumanAbove must be between 0 and 1/);
+  await host.close();
+  await jev.close();
+  store.close();
+});
+
+test("Jev failures are classified: a rejected message is given up on, a bad key or an outage never resolves anything", async () => {
+  const kind = async (reply: any) => {
+    const jev = await fakeJev(() => reply);
+    try {
+      await jevClassifier({ apiKey: KEY, model: MODEL, endpoint: jev.url }).classify(input("x"));
+      return "ok";
+    } catch (e) {
+      return e instanceof ClassifierError ? e.kind : "other";
+    } finally {
+      await jev.close();
+    }
+  };
+  assert.equal(await kind({ status: 401 }), "config");
+  assert.equal(await kind({ status: 402 }), "config");
+  assert.equal(await kind({ status: 404 }), "config");
+  assert.equal(await kind({ status: 400 }), "message");
+  assert.equal(await kind({ status: 422 }), "message");
+  assert.equal(await kind({ status: 429 }), "transient");
+  assert.equal(await kind({ status: 503 }), "transient");
+  assert.equal(await kind({ status: 200, raw: "<html>" }), "message");
+  assert.equal(await kind({ answers: {} }), "message");
+
+  const store = world();
+  const jev = await fakeJev((b) => (b.state.message.includes("weird") ? { status: 422 } : answerFor(b, "ch-incidents", { p: 0.9 })));
+  const host = await routed(store, new RouterHarness({ classifier: jevClassifier({ apiKey: KEY, model: MODEL, endpoint: jev.url }), mode: "enforce", minConfidence: 0.5, ruleVersion: "r1", external: { allowRealms: ["realm-infra"] } }));
+  host.onError = () => {};
+  store.submitMessage("human:bob", "w", "weird input");
+  store.submitMessage("human:bob", "a", "production servers keep crashing");
+  await host.settle();
+  assert.deepEqual(unresolved(store, "human:bob"), [["w", "classifier-error"]]);
+  assert.equal(posted(store, "ch-incidents").length, 1);
   await host.close();
   await jev.close();
   store.close();
