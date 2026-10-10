@@ -647,14 +647,16 @@ export class Store {
    * something that must see work without being able to take it (a launcher) finds it. `claimable` = open, or claimed
    * with an expired lease.
    */
-  listWork(actorId: Id, o: { context?: Id; status?: WorkStatus | "claimable"; limit?: number } = {}, now = Date.now()): WorkItem[] {
+  listWork(actorId: Id, o: { context?: Id; id?: Id; status?: WorkStatus | "claimable"; limit?: number } = {}, now = Date.now()): WorkItem[] {
     const limit = Math.min(Math.max(Math.trunc(o.limit ?? 200), 1), 1000);
     if (o.status !== undefined && !["open", "claimed", "done", "failed", "claimable"].includes(o.status)) throw new Error(`bad-status: ${o.status}`);
     if (o.context !== undefined) this.mustMember(o.context, actorId, "read");
     const contexts = o.context !== undefined ? [o.context] : this.inbox(actorId).map((c) => c.context);
     const out: WorkItem[] = [];
     for (const c of contexts) {
-      const rows = this.db.prepare(`SELECT * FROM work WHERE context_id=? ORDER BY created_at, rowid`).all(c) as WorkRow[];
+      const rows = (o.id === undefined
+        ? this.db.prepare(`SELECT * FROM work WHERE context_id=? ORDER BY created_at, rowid`).all(c)
+        : this.db.prepare(`SELECT * FROM work WHERE context_id=? AND id=?`).all(c, o.id)) as WorkRow[];
       for (const r of rows) {
         const w = this.workItem(r);
         const claimable = w.status === "open" || (w.status === "claimed" && w.leaseUntil !== null && w.leaseUntil < now);

@@ -408,7 +408,27 @@ passed; a worker reaches Core but not the internet, the Kubernetes API, the node
 refuses to open in a namespace with no policies. **Not covered:** a cluster other than k3s (kind, a managed one), a
 launcher running inside the cluster (it uses your kubeconfig; an in-cluster one would need a ServiceAccount, a Role
 for Jobs and a REST `JobRunner`), Pi workers (the image carries the Pi packages, but the lab's task is the echo
-executor), Temporal (item 9's second half; the cluster has one, in `ai-workflows`, untouched).
+executor), the Temporal worker in-cluster (see Temporal above).
+
+## Temporal (orchestrator only)
+
+`src/adapters/temporal/` (optional `@temporalio/*` packages, confined there by a boundary test). Temporal decides
+progression; **Piople agents do the work**. Workflows are deterministic and call Piople only through Activities, as
+one ordinary actor (the orchestrator, needs `write` in the cases it drives):
+
+- `requestWork` / `awaitWork` / `requestDecision` / `awaitDecision`. Ids are derived from a key the workflow builds
+  from its own workflow id and step name, so an Activity retry, a replayed workflow or a restarted worker **replays in
+  Core instead of duplicating**. Waiting Activities heartbeat, so a dead worker is noticed in seconds.
+- **Work is addressed to a named actor**, never to a skill: a skill-addressed item is fair game for the Kubernetes
+  launcher, and two orchestrators must never start the same work.
+- `piopleChain` is an example: ask an agent, put the result to a human (a real Core decision, with `decide`
+  required), and only on "yes" ask a second agent. `node src/adapters/temporal/worker.ts` runs the worker
+  (`TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_TASK_QUEUE`, `PIO_CORE_URL`, `PIO_TOKEN`, `PIO_ACTOR`; the
+  bundler needs `HOME`/`TMPDIR`, so do not start it with a bare environment).
+- Tested against a local Temporal dev server that the SDK downloads (skipped when the packages or the server are
+  unavailable): the chain; a "no" from the human stops it; the Activities are idempotent; and a worker process
+  **SIGKILLed while waiting on an agent** is replaced by a new one that finishes the chain with exactly one item per
+  step, each claimed and completed once. Not run against the Temporal in the cluster, and not in-cluster.
 
 ## Across processes and machines
 
@@ -451,6 +471,5 @@ const host = new Host(core);
 ## Not built yet
 
 - **Container-level environments** beyond what the lab shows (per-pod secrets, quotas, non-k3s clusters); the process-level file profile and the network-policy lab exist.
-- **Temporal** adapter (the Kubernetes launcher and worker exist; see above).
 - Push delivery (SSE/long-poll), signature-based identity, a multi-node Core.
 

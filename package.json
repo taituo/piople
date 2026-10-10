@@ -26,6 +26,11 @@
   "optionalDependencies": {
     "@earendil-works/chord": "1.0.4",
     "@earendil-works/pi-ai": "1.0.4",
-    "@earendil-works/pi-durable": "1.0.4"
+    "@earendil-works/pi-durable": "1.0.4",
+    "@temporalio/activity": "1.24.0",
+    "@temporalio/client": "1.24.0",
+    "@temporalio/testing": "1.24.0",
+    "@temporalio/worker": "1.24.0",
+    "@temporalio/workflow": "1.24.0"
   }
 }

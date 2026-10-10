@@ -22,6 +22,8 @@ test("work-list: a read-only member sees work in its contexts, cannot take it, a
   assert.equal((runOp(s, "agent:look", "work-list", { status: "claimable" }) as any[]).length, 0);
   assert.deepEqual((runOp(s, "agent:look", "work-list", { status: "claimed" }) as any[]).map((w) => w.claimedBy), ["agent:w"]);
   assert.equal((runOp(s, "agent:look", "work-list", { context: "c1" }) as any[]).length, 1, "no filter: all states");
+  assert.deepEqual((runOp(s, "agent:look", "work-list", { context: "c1", id: "w1" }) as any[]).map((w) => w.id), ["w1"], "one item by id");
+  assert.deepEqual(runOp(s, "agent:look", "work-list", { context: "c1", id: "nope" }), []);
   assert.throws(() => runOp(s, "agent:look", "work-list", { status: "nope" }), /bad-status/);
   assert.equal(statusFor("bad-status: nope").status, 400);
   s.close();

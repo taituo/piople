@@ -37,3 +37,13 @@ test("nothing outside src/hosts and src/harnesses knows about harnesses", () => 
     for (const i of imports(f)) assert.ok(!/hosts|harnesses/.test(i), `${relative(".", f)} imports ${i}`);
   }
 });
+
+test("the Temporal SDK is confined to src/adapters/temporal, and nothing else knows the adapters", () => {
+  for (const f of files("src")) {
+    if (f.includes("adapters/temporal")) continue;
+    for (const i of imports(f)) assert.ok(!i.startsWith("@temporalio"), `${relative(".", f)} imports ${i}`);
+  }
+  for (const f of [...files("src/core"), "src/ops.ts", ...files("src/hosts"), ...files("src/harnesses"), ...files("src/http"), ...files("src/mcp"), ...files("src/cli")]) {
+    for (const i of imports(f)) assert.ok(!/adapters/.test(i), `${relative(".", f)} imports ${i}`);
+  }
+});
