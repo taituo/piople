@@ -41,7 +41,7 @@ export function createCoreServer(store: Store, o: ServerOptions = {}): http.Serv
     const url = new URL(req.url ?? "/", "http://localhost");
     if (url.pathname === "/v1/health") return req.method === "GET" ? send(200, { ok: true }) : fail(405, "method", "GET only");
 
-    const m = /^Bearer (\S+)$/.exec(req.headers.authorization ?? "");
+    const m = /^Bearer (\S+)$/i.exec(req.headers.authorization ?? "");
     const actor = m ? store.actorForToken(m[1]!) : undefined;
     if (!actor) return fail(401, "unauthorized", "missing or invalid token");
 

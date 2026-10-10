@@ -386,3 +386,21 @@ test("remote MCP: a stuck tool call does not stop initialize and tools/list from
   stuck.closeAllConnections();
   await new Promise((r) => stuck.close(r));
 });
+
+test("the Bearer scheme name is case-insensitive (RFC 7235), but a token must still be exactly right", async () => {
+  const store = new Store(":memory:");
+  const token = store.issueToken("human:alice");
+  const srv = await boot(store);
+  const who = async (authorization?: string) => (await fetch(`${srv.url}/v1/whoami`, { headers: authorization === undefined ? {} : { authorization } })).status;
+  assert.equal(await who(`Bearer ${token}`), 200);
+  assert.equal(await who(`bearer ${token}`), 200, "lower case");
+  assert.equal(await who(`BEARER ${token}`), 200, "upper case");
+  assert.equal(await who(`Bearer ${token}x`), 401, "wrong token");
+  assert.equal(await who(`bearer ${token.toUpperCase()}`), 401, "the token itself stays case-sensitive");
+  assert.equal(await who(token), 401, "no scheme");
+  assert.equal(await who(`Basic ${token}`), 401, "another scheme");
+  assert.equal(await who("Bearer "), 401, "empty");
+  assert.equal(await who(), 401, "none");
+  await srv.close();
+  store.close();
+});
