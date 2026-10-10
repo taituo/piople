@@ -140,3 +140,23 @@ test("modelSummarizer: plain chat/completions call, pinned model, strict answer,
   await assert.rejects(s.summarize({ level: 1, texts: ["a"], firstSeq: 1, lastSeq: 1 }), /ran out of tokens/, "a cut-off summary is an error, not a filed half-sentence");
   await new Promise<void>((r) => { srv.closeAllConnections(); srv.close(() => r()); });
 });
+
+test("find: exact word search over the original lines, newest last, all words required, summaries not searched", async () => {
+  const m = open();
+  const events = history(60);
+  events[4] = msg(5, "Alert A-228 fires above 3.6 percent error rate.");
+  events[40] = msg(41, "Update: alert a-228 threshold changed to 2.9 percent.");
+  events[20] = msg(21, "Alert A-229 fires above 7.0 percent error rate.");
+  await build(m, events);
+  const r = m.find("c1", "a-228 percent");
+  assert.deepEqual(r.matches.map((x) => x.id), ["e5", "e41"], "case-insensitive, both lines, oldest first so the correction is last");
+  assert.equal(r.total, 2);
+  assert.equal(m.find("c1", "a-228 7.0").matches.length, 0, "every word must occur in the same line");
+  assert.deepEqual(m.find("c1", "A-229").matches.map((x) => x.id), ["e21"], "a near-duplicate does not match");
+  assert.equal(m.find("c1", "").total, 0);
+  assert.equal(m.find("c1", "100%_").matches.length, 0, "LIKE wildcards in the query are literal");
+  assert.equal(m.find("c1", "routine", 3).matches.length, 3, "limited to the newest few");
+  assert.equal(m.find("c1", "routine", 3).total > 3, true);
+  assert.ok(!m.find("c1", "items events").matches.length, "summary text is not searched: only the original lines");
+  m.close();
+});

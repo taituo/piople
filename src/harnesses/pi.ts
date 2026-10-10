@@ -77,12 +77,13 @@ export type PiHarnessOptions = {
 };
 
 const MEMORY_LINE = `ZOOM: <memory id>      (read the original lines behind a summary in the case memory)
+FIND: <words>          (search the whole case history for lines containing all the words; newest match last, a later line may correct an earlier one)
 `;
 const protocol = (memory: boolean, tools: string[]) => `You take part in a shared case with humans and other agents. You only act by writing command lines, one per line; anything else you write is ignored. Commands:
-POST: <message to everyone>
+POST: <message to everyone; this is also how you answer a question someone wrote in the case>
 OBSERVE: <finding, with its evidence>
 ASK: <actor id> | <question>
-ANSWER: <request key> | <answer>
+ANSWER: <request key> | <answer>      (only for an ask listed under "Owed to you")
 DECIDE: <decision id> | <option>
 WORK: <skill> | <json input>      (or WORK: @<actor id> | <json input> to address one actor)
 CLAIM: <work id>
@@ -90,7 +91,7 @@ DONE: <work id> | <attempt> | <json result>
 FAIL: <work id> | <attempt> | <reason>
 ${memory ? MEMORY_LINE : ""}${tools.length ? `TOOL: <name> | <json arguments>      (your tools, run for you in a confined sandbox:\n${tools.map((t) => `  ${t}`).join("\n")})\n` : ""}Rules: the system tells you what is new and what is owed to you. To reply to a message, use POST. ANSWER is only for an ask listed under "Owed to you", with its key copied exactly; the numbers at the start of log lines are event numbers, not keys. WORK creates a NEW work item for someone else: never write WORK for work that already appears in the log (it is already requested; the item shown under "Owed to you" is yours to CLAIM, not to re-request). Do not invent facts or results; say what you do not know. Permissions are enforced by the system: if a command is refused you will be told, do not try to get around it. If nothing needs doing, reply NOOP. Keep replies short.`;
 
-const CMD = /^\s*(POST|OBSERVE|ASK|ANSWER|DECIDE|WORK|CLAIM|DONE|FAIL|ZOOM|TOOL):\s?(.*)$/;
+const CMD = /^\s*(POST|OBSERVE|ASK|ANSWER|DECIDE|WORK|CLAIM|DONE|FAIL|ZOOM|FIND|TOOL):\s?(.*)$/;
 
 /** Strip model control-token leakage (e.g. <ds_s>) before parsing. */
 export function sanitize(text: string): string {
@@ -226,6 +227,12 @@ export class PiHarness implements Harness {
     return done.state?.outcome?.status === "completed" ? "completed" : "failed";
   }
 
+  /** How many times Pi has compacted this case's transcript (its `pi.compaction` entries). */
+  async compactions(contextId: string): Promise<number> {
+    const conv = await this.conversation(contextId);
+    return (await this.entries(conv, 0)).filter((e) => e.kind === "pi.compaction").length;
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -257,7 +264,7 @@ export class PiHarness implements Harness {
     const conv = await this.conversation(mem ? `${s.context}@${s.cursor}` : s.context);
     if (mem) {
       const v = mem.view(s.context, this.o.memory?.budgetTokens);
-      if (v.nodes > 0) prompt = `Case memory (older events are folded into summaries; reply ZOOM: <id> to read the original lines behind one):\n${v.text}\n\n${prompt}`;
+      if (v.nodes > 0) prompt = `Case memory (older events are folded into summaries, but the whole history is kept: reply FIND: <words> to search it for exact lines, or ZOOM: <id> to read the lines behind a summary. Do not say you do not know before you have tried FIND):\n${v.text}\n\n${prompt}`;
     }
     const base = `${s.actor}@${s.context}#${s.cursor}`;
     let nudged = false;
@@ -344,7 +351,17 @@ export class PiHarness implements Harness {
     return `Tool ${name} returned:\n${r.output.length > 6000 ? `${r.output.slice(0, 6000)}\n…(cut)` : r.output}`;
   }
 
-  private zoom(s: Step, id: string): string {
+  private find(s: Step, query: string): string {
+    if (!this.memory) return "REFUSED FIND: this agent has no case memory";
+    if (!query) return "REFUSED FIND: give the words to look for";
+    const { matches, total } = this.memory.find(s.context, query);
+    if (!matches.length) return `Find "${query}": no line contains all of those words. Try fewer or different words.`;
+    const text = matches.map((m) => `[${m.id}] ${m.text}`).join("\n");
+    return `Find "${query}": ${total} match${total === 1 ? "" : "es"}${total > matches.length ? `, the newest ${matches.length} shown (oldest first)` : ""}:\n${text.length > 6000 ? `${text.slice(0, 6000)}\n…(cut)` : text}`;
+  }
+
+  private zoom(s: Step, rawId: string): string {
+    const id = /^\d+$/.test(rawId) ? `e${rawId}` : rawId; // a bare event number means that event
     if (!this.memory) return "REFUSED ZOOM: this agent has no case memory";
     const z = this.memory.zoom(s.context, id);
     if (!z) return `REFUSED ZOOM: no memory entry ${id} in this case`;
@@ -373,6 +390,7 @@ export class PiHarness implements Harness {
           return `Claimed ${r.work.id}, attempt ${r.work.attempt}. Input: ${JSON.stringify(r.work.input)}. Finish with DONE or FAIL using this attempt.`;
         }
         case "ZOOM": return this.zoom(s, parts[0] ?? "");
+        case "FIND": return this.find(s, rest.trim());
         case "TOOL": return await this.tool(rest);
         case "DONE": await s.run("work-complete", { id: parts[0], attempt: parts[1], result: parts.slice(2).join(" | ") }); return null;
         case "FAIL": await s.run("work-fail", { id: parts[0], attempt: parts[1], reason: parts.slice(2).join(" | ") }); return null;

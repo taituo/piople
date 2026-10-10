@@ -150,6 +150,21 @@ export class CaseMemory {
     return { node, children: node.children.map((c) => this.node(get.get(context, c) as Record<string, unknown>)) };
   }
 
+  /**
+   * Exact search over the original lines (level 0 is never discarded, only left out of the view): every word must occur,
+   * case-insensitively. Newest matches are returned last, because a later line may correct an earlier one. Summaries are
+   * not searched: they paraphrase, and the point of a search is to get the words as they were said.
+   */
+  find(context: string, query: string, limit = 8): { matches: MemNode[]; total: number } {
+    const words = query.toLowerCase().split(/\s+/).filter((w) => w.length > 0).slice(0, 6);
+    if (!words.length) return { matches: [], total: 0 };
+    const like = words.map(() => `LOWER(text) LIKE ? ESCAPE '\\'`).join(" AND ");
+    const args = words.map((w) => `%${w.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
+    const rows = this.db.prepare(`SELECT * FROM nodes WHERE context=? AND level=0 AND ${like} ORDER BY first_seq`).all(context, ...args) as Array<Record<string, unknown>>;
+    const matches = rows.map((r) => this.node(r));
+    return { matches: matches.slice(-limit), total: matches.length };
+  }
+
   /** Decisions already taken or asked whose events have been folded into summaries: pinned verbatim. */
   pinned(context: string, max = 20): MemNode[] {
     const q = this.db.prepare(`SELECT * FROM nodes WHERE context=? AND level=0 AND parent IS NOT NULL AND type IN (${PINNED.map(() => "?").join(",")}) ORDER BY first_seq DESC LIMIT ?`);

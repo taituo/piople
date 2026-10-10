@@ -290,7 +290,8 @@ host.start();            // or: await host.settle() in tests/scripts
 A Pi agent that lives for weeks cannot carry one ever-growing transcript. With `memory`, `PiHarness` starts each
 delivery in a fresh conversation whose first prompt holds a **bounded view** of the case: the newest events
 verbatim, older ones folded into summaries (chunks of `k`, summaries of summaries above), every line with an id.
-The agent reads what a summary stands for with `ZOOM: <id>` (children, down to the original lines).
+The agent reads what a summary stands for with `ZOOM: <id>` (children, down to the original lines) and searches the
+whole kept history for exact words with `FIND: <words>` (newest match last: a later line may correct an earlier one).
 
 ```ts
 import { extractiveSummarizer, modelSummarizer } from "./src/harnesses/memory.ts";
@@ -325,16 +326,35 @@ await PiHarness.open({ /* ... */, memory: {
   | Pi compaction (one linear summary, run once by hand) | 5/5 | 51 k |
   | case memory (this section) | 3/5 (0/5 before a fix, below) | 113 k |
 
-  **At this size the memory does not pay for itself.** 70 short messages are about 5 k tokens, so the whole transcript
-  fits and is cheapest; Pi's compaction kept every planted fact and added almost nothing; the case memory put a view
-  into each of ~80 prompts (twice the tokens) and its recall depends on the model following `ZOOM`. With DeepSeek and
-  GLM it reached 5/5 (previous measurement), with `gpt-4.1-mini` it needed a fix: the model answered messages with
-  `ANSWER:`; Core refuses that, and the refusal now says to use `POST:` (0/5 to 3/5). The memory's claimed advantage
-  (exact recovery of detail a summary dropped) only shows when the history outgrows the window or the facts are
-  fine-grained, and this set exercises neither. **Until a harder benchmark says otherwise, prefer Pi's compaction and
-  treat the case memory as experimental.** A fair Pi run also needs a normal window: with a tiny one Pi leaves its own
-  output (and its summariser) one token of room and loops; and on the opencode Go gateway Pi's compaction request lacks
-  the `x-opencode-session` header the gateway demands, so it fails there (generation requests carry it).
+  **At that size the memory does not pay for itself.** 70 short messages are about 5 k tokens, so the whole transcript
+  fits and is cheapest; Pi's compaction kept every planted fact; the case memory put a view into each of ~80 prompts
+  (twice the tokens). That test could not tell the designs apart, so there is a harder one.
+
+- **The harder benchmark** (`scripts/bench-recall.ts`): 1000 messages in bursts of 20, 24 fine-grained facts (hex tokens,
+  ports, thresholds, owners) among 40 near-duplicate distractors, 4 later corrections, 24 questions that need the exact
+  current value. `gpt-4.1-mini` as agent, Pi's window set to 16 k so its compaction fires repeatedly. Two seeds:
+
+  | | exact recall (seed 1 / seed 2) | tokens, all-in |
+  | --- | --- | --- |
+  | whole transcript (fits a 128 k window; the ceiling) | 24/24 / 23/24 | ~125 k |
+  | Pi automatic compaction (2 compactions) | **3/24 / 2/24** | ~125 k |
+  | case memory with `FIND` and `ZOOM` | **19/24 / 13/24** | ~265 k |
+
+  Where the history outgrows the window, **Pi's linear summary kept almost no exact values and the agent filled the gap
+  with confident inventions** (`token prefix 1a98-5117`, ports `24444`, `24448`, `24418`: plausible, wrong, despite
+  "never guess"). The case memory recovered 54 to 79 %, and when it failed it mostly said it did not know. It costs
+  about twice the tokens of the whole transcript, so it earns its place only once the transcript no longer fits.
+  Caveats: one agent model, two seeds, Pi's window shrunk to force compaction (a real 128 k window would need ~5000
+  messages), and Pi's default compaction prompt may suit coding sessions better than exact identifiers.
+  What mattered inside the memory: **`ZOOM` alone was not enough** (a needle query means guessing a branch of the tree;
+  first score 3/8 at 200 messages), an exact-word **`FIND`** over the kept original lines fixed that; and the agent
+  must be told to try `FIND` before saying it does not know (three misses were "not available" without a search).
+  Not measured: other agent models (the weaker the model, the more the protocol detours cost), the summariser's own
+  quality in isolation, longer runs, and what a smarter summary prompt for Pi's compaction would change.
+- **Prefer, by size:** history that fits the window: keep the transcript (or Pi's compaction as it nears the window);
+  history that outgrows it and where exact values matter: the case memory. A fair Pi run also needs a normal window:
+  with a tiny one Pi leaves its own output (and its summariser) one token of room and loops; and on the opencode Go
+  gateway Pi's compaction request lacks the `x-opencode-session` header the gateway demands, so it fails there.
 - Each delivery is its own small durable Pi conversation; they accumulate in the Pi store (not pruned yet).
 - **Measured with real models** (`scripts/live-memory.ts`): four facts and one human decision planted in a 70-message
   case, asked back one at a time. Agent `deepseek-v4-flash`: no memory 1/5 (only the fact still inside the newest

@@ -127,3 +127,21 @@ test("memory: zooming an unknown id is feedback, not a crash", async () => {
   await model.close();
   store.close();
 });
+
+test("memory: the agent can FIND an exact line in the whole history, and a bare number zooms to that event", async () => {
+  const { store, alice, fill } = await world(40);
+  const model = await fakeModel((m, n) => {
+    const u = lastUser(m);
+    if (/^Find /.test(u)) return /JUNIPER-7731/.test(u) ? "POST: found: JUNIPER-7731" : "NOOP";
+    if (/^Zoom /.test(u)) return "NOOP";
+    return n === 36 ? "FIND: vault code" : "NOOP";
+  });
+  const host = new Host(new LocalCore(store));
+  await host.add({ actor: "agent:pi", harness: await PiHarness.open({ ...opts(model.baseUrl, ":memory:", { summarizer: extractiveSummarizer(), k: 4, recent: 6, budgetTokens: 600 }), maxRounds: 4 }) });
+  await fill(host, 1, 40);
+  assert.deepEqual(posts(store), ["found: JUNIPER-7731"]);
+  assert.match(sys(model.requests[0]!), /FIND: <words>/);
+  await host.close();
+  await model.close();
+  store.close();
+});
