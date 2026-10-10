@@ -80,9 +80,11 @@ test("pending asks are found in linear time: 6,000 open asks and some answered o
   for (let i = 0; i < 6000; i++) s.requestAssistance("c", "human:a", `a${i}`, "human:b", `q${i}?`, {});
   for (let i = 0; i < 6000; i += 3) s.answerAssistance("c", "human:b", `r${i}`, `a${i}`, "done", []);
   const t0 = Date.now();
-  const pending = s.pending("c", "human:b").assistance;
+  const all = s.pending("c", "human:b");
+  const pending = all.assistance;
   const took = Date.now() - t0;
-  assert.equal(pending.length, 4000, "the answered third is gone, the rest is still owed");
+  assert.equal(pending.length + (all.moreAssistance ?? 0), 4000, "the answered third is gone, the rest is still owed (listed plus the count left out)");
+  assert.ok(pending.length <= 50, "and the list itself is bounded");
   assert.deepEqual(pending.slice(0, 3).map((a) => a.key), ["a1", "a2", "a4"], "in the order they were asked");
   assert.ok(took < 500, `took ${took} ms (the correlated NOT EXISTS needed about 3 s for 6,000)`);
   s.close();

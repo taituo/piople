@@ -131,8 +131,11 @@ export type InboxSummary = { context: Id; title: string; kind: ContextKind; real
 export type Pending = {
   /** assistance.requested addressed to me with no assistance.answered for its key */
   assistance: Array<{ key: string; from: Id; question: string; seq: number }>;
+  /** How many were left out to keep the list small (like moreOpen); they come as these are answered. */
+  moreAssistance?: number;
   /** open decisions I may resolve (needs decide, and not an echo delegate) */
   decisions: Array<{ id: Id; question: string; options: string[]; requestedBy: Id }>;
+  moreDecisions?: number;
   work: {
     /** claimable by me right now: addressed to me or to a skill I declared, open or lease expired */
     open: Array<{ id: Id; from: Id; skill: string | null; to: Id | null; input: unknown }>;
@@ -171,6 +174,18 @@ export const MAX_READ_BYTES = 4_000_000;
 /** How many open work items, and how many characters of their inputs, one inbox lists. */
 export const PENDING_OPEN_MAX = 50;
 export const PENDING_OPEN_CHARS = 200_000;
+/** The first items of a list while their count and size stay small (the first always comes); how many were left out. */
+function bounded<T>(items: T[], size: (x: T) => number): { kept: T[]; more: number } {
+  const kept: T[] = [];
+  let chars = 0;
+  for (const x of items) {
+    const n = size(x);
+    if (kept.length && (kept.length >= PENDING_OPEN_MAX || chars + n > PENDING_OPEN_CHARS)) break;
+    kept.push(x);
+    chars += n;
+  }
+  return { kept, more: items.length - kept.length };
+}
 /** The longest claim lease: a holder that dies keeps its work this long at most. Without a bound, 1e14 ms (3000 years) made a claim permanent. */
 export const MAX_LEASE_MS = 7 * 24 * 3600 * 1000;
 const checkLease = (leaseMs: number | undefined) => {
@@ -1066,17 +1081,16 @@ export class Store {
     // Every open item's whole input comes with the inbox, and a Pi agent puts all of it in its prompt: 25 items of 0.9 MB made
     // 26 MB of inbox, and whoever may request work for an agent could make that as big as they like. The first item always
     // comes; the rest while the count and the size stay small. The others are offered when these are taken.
-    const open: typeof allOpen = [];
-    let openChars = 0;
-    for (const w of allOpen) {
-      const n = JSON.stringify(w.input ?? null).length;
-      if (open.length && (open.length >= PENDING_OPEN_MAX || openChars + n > PENDING_OPEN_CHARS)) break;
-      open.push(w);
-      openChars += n;
-    }
+    const { kept: open } = bounded(allOpen, (w) => JSON.stringify(w.input ?? null).length);
     const mine = (this.db.prepare(`SELECT * FROM work WHERE context_id=? AND status='claimed' AND claimed_by=? ORDER BY rowid`).all(contextId, actorId) as WorkRow[])
       .map((r) => this.workItem(r)).map((w) => ({ id: w.id, attempt: w.attempt, leaseUntil: w.leaseUntil, input: w.input }));
-    return { assistance: asks.map((a) => ({ key: a.key, from: a.from_actor, question: a.question, seq: a.seq })), decisions, work: { open, ...(allOpen.length > open.length ? { moreOpen: allOpen.length - open.length } : {}), mine } };
+    const asked = bounded(asks.map((a) => ({ key: a.key, from: a.from_actor, question: a.question, seq: a.seq })), (a) => a.question.length + 100);
+    const deciding = bounded(decisions, (d) => d.question.length + JSON.stringify(d.options).length);
+    return {
+      assistance: asked.kept, ...(asked.more ? { moreAssistance: asked.more } : {}),
+      decisions: deciding.kept, ...(deciding.more ? { moreDecisions: deciding.more } : {}),
+      work: { open, ...(allOpen.length > open.length ? { moreOpen: allOpen.length - open.length } : {}), mine },
+    };
   }
 
   /** What happened while I was away, across every context I can read. */

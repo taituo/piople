@@ -305,3 +305,26 @@ test("the open work an inbox lists is bounded too: whoever may request work cann
   assert.equal(taken.size, 30, "every item was offered in the end");
   store.close();
 });
+
+test("open asks and decisions in an inbox are bounded as well, and the rest follows as they are answered", async () => {
+  const { alice, as, store } = world();
+  await alice("create", { id: "c1", title: "t" });
+  await alice("join", { context: "c1", actor: "agent:x", caps: "read,write,decide" });
+  for (let i = 0; i < 60; i++) await alice("ask", { context: "c1", to: "agent:x", question: `${i}:` + "q".repeat(19_000), key: `a${i}` });
+  for (let i = 0; i < 5; i++) await alice("decision-request", { context: "c1", id: `d${i}`, question: "ship?", options: Array.from({ length: 2_000 }, (_, j) => `option-number-${j}`).join(",") });
+  const agent = as("agent:x");
+  const first = await agent("inbox", { context: "c1" });
+  const asks = JSON.stringify(first.pending.assistance).length, decisions = JSON.stringify(first.pending.decisions).length;
+  assert.ok(first.pending.assistance.length >= 1 && asks < 400_000, `asks listed ${first.pending.assistance.length}, ${asks} characters`);
+  assert.equal(first.pending.moreAssistance, 60 - first.pending.assistance.length);
+  assert.ok(first.pending.decisions.length >= 1 && decisions < 400_000, `decisions listed ${first.pending.decisions.length}, ${decisions} characters`);
+  assert.equal(first.pending.moreDecisions, 5 - first.pending.decisions.length);
+  const answered = new Set<string>();
+  for (let round = 0; round < 80; round++) {
+    const inbox = await agent("inbox", { context: "c1" });
+    if (!inbox.pending.assistance.length) break;
+    for (const a of inbox.pending.assistance) { await agent("answer", { context: "c1", request: a.key, answer: "ok" }); answered.add(a.key); }
+  }
+  assert.equal(answered.size, 60, "every ask was shown in the end");
+  store.close();
+});
