@@ -251,3 +251,28 @@ test("a model that answers a message with ANSWER is told to use POST, and recove
   await model.close();
   store.close();
 });
+
+test("a model that accepts the request and never answers fails the delivery after runTimeoutMs instead of hanging for ever", async () => {
+  const http = await import("node:http");
+  const sockets: Array<{ destroy(): void }> = [];
+  const srv = http.createServer(() => { /* never answers */ });
+  srv.on("connection", (c) => sockets.push(c));
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const baseUrl = `http://127.0.0.1:${(srv.address() as { port: number }).port}/v1`;
+  const { store, alice } = world();
+  const errors: string[] = [];
+  const host = new Host(new LocalCore(store));
+  host.onError = (e) => errors.push(String((e.error as Error).message));
+  await host.add({ actor: "agent:pi", harness: await PiHarness.open({ ...piOpts(baseUrl), runTimeoutMs: 400 }) });
+  await alice("create", { id: "c1", title: "t" });
+  await alice("join", { context: "c1", actor: "agent:pi", caps: "read,write" });
+  await alice("post", { context: "c1", text: "hello?" });
+  const t0 = Date.now();
+  await host.tick();
+  assert.ok(Date.now() - t0 < 5_000, `the delivery gave up after ${Date.now() - t0} ms`);
+  assert.ok(errors.some((m) => /model call failed: no answer within 400 ms/.test(m)), `reported: ${JSON.stringify(errors)}`);
+  for (const c of sockets) c.destroy();
+  srv.close();
+  store.close();
+  process.exitCode ||= 0;
+});

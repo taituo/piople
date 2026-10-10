@@ -65,6 +65,8 @@ export type PiHarnessOptions = {
    * cost. Over the limit the run is aborted and the agent says so in the case.
    */
   maxToolCalls?: number;
+  /** The longest one model round may take, in ms (default 300000). Over it the delivery fails and the host retries it. */
+  runTimeoutMs?: number;
   /**
    * Pi's own context handling. `contextWindow` is the model's window as Pi sees it (default 128000, a guess: set the real
    * one); `compaction` are Pi's automatic-compaction thresholds (reserveTokens, keepRecentTokens, backgroundTokens).
@@ -439,7 +441,19 @@ export class PiHarness implements Harness {
     const fails = (this.map.prepare(`SELECT n FROM failed WHERE request_id=?`).get(requestId) as { n: number } | undefined)?.n ?? 0;
     const before = await this.lastAssistantId(conv);
     await conv.submit({ type: "input", content: text, requestId: fails ? `${requestId}~${fails}` : requestId } as never, BACKGROUND_CONTEXT);
-    await conv.waitForIdle(BACKGROUND_CONTEXT);
+    // Not for ever: a model that accepts the request and never answers (a dead connection, a hung provider) would otherwise
+    // keep this delivery, and every other case of this actor, waiting until the process is killed.
+    const limit = this.o.runTimeoutMs ?? 300_000;
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = await Promise.race([
+      conv.waitForIdle(BACKGROUND_CONTEXT).then(() => false),
+      new Promise<boolean>((r) => { timer = setTimeout(() => r(true), limit); }),
+    ]);
+    clearTimeout(timer);
+    if (timedOut) {
+      this.map.prepare(`INSERT INTO failed(request_id,n) VALUES(?,1) ON CONFLICT(request_id) DO UPDATE SET n=n+1`).run(requestId);
+      throw new Error(`model call failed: no answer within ${limit} ms`);
+    }
     let got = await this.assistantSince(conv, before);
     if (!got.found && before > 0) got = await this.assistantSince(conv, 0, true); // Pi saw this requestId already
     if (got.error || !got.found) {
