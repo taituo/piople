@@ -259,6 +259,7 @@ export class Store {
         data = m.write?.() ?? {};
       } catch (e) {
         // Reusing an id with a different request must be a clean conflict, not a database error text.
+        if (/UNIQUE constraint failed: events\.context_id, events\.key/.test(e instanceof Error ? e.message : "")) throw new Error(`key-conflict: a key this request needs is already used in a context it touches`);
         const dup = /UNIQUE constraint failed: (\w+)\.(?:\w+, \w+\.)?id\b/.exec(e instanceof Error ? e.message : "");
         if (dup) throw new Error(`id-in-use: that ${dup[1]!.replace(/s$/, "")} id already exists with different content`);
         throw e;
@@ -416,8 +417,9 @@ export class Store {
           this.db.prepare(`DELETE FROM members WHERE context_id=? AND actor_id=?`).run(c, target);
           this.db.prepare(`DELETE FROM cursors WHERE context_id=? AND actor_id=?`).run(c, target);
           if (c !== contextId) {
+            // One key per context: the caller's key is taken in the realm itself and may be taken in an inner context.
             this.db.prepare(`INSERT INTO events(ts,type,context_id,actor_id,key,data) VALUES(?,?,?,?,?,?)`).run(
-              Date.now(), "member.removed", c, target, `${key}`, JSON.stringify({ by, reason: "realm-removed", realm: contextId, reopenedWork: reopened.filter((r) => r.context === c).map((r) => r.work) }),
+              Date.now(), "member.removed", c, target, `${key}@${c}`, JSON.stringify({ by, reason: "realm-removed", realm: contextId, reopenedWork: reopened.filter((r) => r.context === c).map((r) => r.work) }),
             );
           }
         }

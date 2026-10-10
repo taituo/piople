@@ -174,3 +174,24 @@ test("declared skills are bounded: 100 at most, 200 characters each", async () =
   assert.equal(JSON.parse((store.db.prepare("SELECT skills FROM actors WHERE id='agent:bob'").get() as { skills: string }).skills).length, 100, "the refused calls changed nothing");
   store.close();
 });
+
+test("leaving a realm with a key that is taken in an inner context works; a real collision is a clean key-conflict and changes nothing", async () => {
+  const { alice, as, store } = world();
+  const bob = as("human:bob");
+  await alice("create", { id: "r1", title: "Realm", kind: "realm" });
+  await alice("join", { context: "r1", actor: "human:bob", caps: "read,write" });
+  await alice("create", { id: "ch1", title: "Channel", kind: "channel", realm: "r1" });
+  await alice("join", { context: "ch1", actor: "human:bob", caps: "read,write" });
+  await alice("post", { context: "ch1", text: "someone used k1 here", key: "k1" });
+  await bob("leave", { context: "r1", key: "k1" }); // used to fail with a raw UNIQUE constraint error
+  const members = (c: string) => (store.db.prepare("SELECT actor_id FROM members WHERE context_id=?").all(c) as Array<{ actor_id: string }>).map((m) => m.actor_id);
+  assert.deepEqual([members("r1"), members("ch1")], [["human:alice"], ["human:alice"]], "bob left the realm and the channel inside it");
+  assert.ok(store.eventsSince("ch1", 0).some((e) => e.type === "member.removed" && e.key === "k1@ch1"));
+
+  await alice("join", { context: "r1", actor: "human:bob", caps: "read,write" });
+  await alice("join", { context: "ch1", actor: "human:bob", caps: "read,write" });
+  await alice("post", { context: "ch1", text: "occupies the derived key", key: "k2@ch1" });
+  await assert.rejects(bob("leave", { context: "r1", key: "k2" }), /^Error: key-conflict/);
+  assert.deepEqual([members("r1").sort(), members("ch1").sort()], [["human:alice", "human:bob"], ["human:alice", "human:bob"]], "the refused leave changed nothing");
+  store.close();
+});
