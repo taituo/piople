@@ -44,3 +44,23 @@ test("a path that is not a usable database ends in a one-line error, never a Nod
   assert.equal(mcp.status, 1);
   assert.match(mcp.stderr, /^piople-mcp: cannot-open-database/);
 });
+
+test("the HTTP server refuses a bad PIO_PORT with one line, says when the port is taken, and does not read an empty port as 'pick one'", async () => {
+  const net = await import("node:net");
+  const dir = mkdtempSync(join(tmpdir(), "piople-port-"));
+  const env = { PIO_DATA: join(dir, "p.sqlite") };
+  for (const bad of ["abc", "99999", "-5", "80.5", ""]) {
+    const r = spawnSync(process.execPath, ["--no-warnings", "src/http/main.ts"], { encoding: "utf8", env: { ...process.env, ...env, PIO_PORT: bad }, timeout: 15_000 });
+    assert.equal(r.status, 1, `PIO_PORT=${JSON.stringify(bad)}: ${r.stdout}${r.stderr.slice(0, 100)}`);
+    assert.match(r.stderr, /^error: bad-port: /, `PIO_PORT=${JSON.stringify(bad)}`);
+    assert.doesNotMatch(r.stderr, /node:net|\n\s+at /, "no stack trace");
+  }
+  const taken = net.createServer();
+  await new Promise<void>((r) => taken.listen(0, "127.0.0.1", r));
+  const port = (taken.address() as import("node:net").AddressInfo).port;
+  const clash = spawnSync(process.execPath, ["--no-warnings", "src/http/main.ts"], { encoding: "utf8", env: { ...process.env, ...env, PIO_PORT: String(port) }, timeout: 15_000 });
+  taken.close();
+  assert.equal(clash.status, 1);
+  assert.match(clash.stderr, /^error: cannot listen on 127\.0\.0\.1:\d+: the port is already in use/);
+  assert.doesNotMatch(clash.stderr, /node:events|\n\s+at /, "no stack trace");
+});
