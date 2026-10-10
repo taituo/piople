@@ -133,6 +133,16 @@ test("kubectlRunner: success is created, AlreadyExists is exists, anything else 
   await assert.rejects(kubectlRunner({ kubectl: join(dir, "missing") }).create(m), /could not be started/);
 });
 
+test("kubectlRunner: a kubectl that never finishes is stopped after timeoutMs and the launch fails, instead of waiting for ever", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "piople-kubectl-"));
+  const p = join(dir, "slow");
+  writeFileSync(p, "#!/bin/sh\ncat > /dev/null\nsleep 30\n");
+  chmodSync(p, 0o755);
+  const t0 = Date.now();
+  await assert.rejects(kubectlRunner({ kubectl: p, timeoutMs: 300 }).create({ kind: "Job" }), /did not finish within 300 ms/);
+  assert.ok(Date.now() - t0 < 3_000, `gave up after ${Date.now() - t0} ms`);
+});
+
 test("egress gate: the Job gets an init container without the token; without a gate there is none", () => {
   const plain = jobManifest("piople-lab", profile, { context: "c1", workId: "w1", skill: "lab.echo" }) as any;
   assert.equal(plain.spec.template.spec.initContainers, undefined);

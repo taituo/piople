@@ -88,15 +88,22 @@ export function jobManifest(namespace: string, p: LaunchProfile, w: { context: s
 }
 
 /** `kubectl create -f -`: a Job that already exists is the success case of a duplicate launch, not an error. */
-export function kubectlRunner(o: { kubectl?: string; kubeContext?: string } = {}): JobRunner {
+export function kubectlRunner(o: { kubectl?: string; kubeContext?: string; timeoutMs?: number } = {}): JobRunner {
   return {
     create: (manifest) => new Promise((resolve, reject) => {
       const args = [...(o.kubeContext ? ["--context", o.kubeContext] : []), "create", "-f", "-", "-o", "name"];
       const p = spawn(o.kubectl ?? "kubectl", args, { stdio: ["pipe", "pipe", "pipe"] });
       let err = "";
+      // kubectl waits for an API server that does not answer for as long as it is let: the launcher (and its Host) would
+      // wait with it. Over the limit it is killed and the launch fails like any other, to be retried on the next poll.
+      let timedOut = false;
+      const limit = o.timeoutMs ?? 60_000;
+      const timer = setTimeout(() => { timedOut = true; p.kill("SIGKILL"); reject(new Error(`kubectl create did not finish within ${limit} ms and was stopped`)); }, limit);
       p.stderr.on("data", (d: Buffer) => { if (err.length < 2000) err += d; });
-      p.on("error", () => reject(new Error("kubectl could not be started")));
+      p.on("error", () => { clearTimeout(timer); reject(new Error("kubectl could not be started")); });
       p.on("close", (code) => {
+        clearTimeout(timer);
+        if (timedOut) return reject(new Error(`kubectl create did not finish within ${limit} ms and was stopped`));
         if (code === 0) return resolve("created");
         if (/AlreadyExists/.test(err)) return resolve("exists");
         reject(new Error(`kubectl create failed: ${err.trim().split("\n")[0] ?? code}`));
