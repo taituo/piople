@@ -174,9 +174,19 @@ test("find: case-insensitive for non-ASCII capitals, wildcards are literal, and 
   assert.deepEqual(ids("100%"), ["e3"]);
   assert.deepEqual(ids("surexthing"), [], "_ is not a wildcard");
   assert.deepEqual(ids("back\\slash"), ["e3"]);
-  assert.deepEqual(ids("e", 0), []);
-  assert.deepEqual(ids("e", -1), []);
-  assert.deepEqual(ids("e", 1), ["e4"], "newest match last, the limit keeps the newest");
-  assert.equal(m.find("c", "e", 1).total, 4);
+  assert.deepEqual(ids("a", 0), []);
+  assert.deepEqual(ids("a", -1), []);
+  assert.deepEqual(ids("a", 1), ["e4"], "newest match last, the limit keeps the newest");
+  assert.equal(m.find("c", "a", 1).total, 4, "'a' is in what every one of the four lines says");
+  m.close();
+});
+
+test("find: only the words that were said match, not the seq, actor or type that prefix a line", async () => {
+  const m = open();
+  await build(m, [msg(1, "port is 5433"), { seq: 2, actorId: "agent:alice-bot", type: "observation.recorded", data: { text: "nothing about ports" } }, msg(3, "message from the team")]);
+  assert.equal(m.find("c1", "message").matches.length, 1, "only the line that says 'message', not every message.posted");
+  assert.equal(m.find("c1", "alice").matches.length, 0, "the actor id is not text");
+  assert.equal(m.find("c1", "observation").matches.length, 0, "nor is the event type");
+  assert.deepEqual(m.find("c1", "5433").matches.map((x) => x.id), ["e1"]);
   m.close();
 });

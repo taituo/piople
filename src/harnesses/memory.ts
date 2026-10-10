@@ -151,8 +151,8 @@ export class CaseMemory {
   }
 
   /**
-   * Exact search over the original lines (level 0 is never discarded, only left out of the view): every word must occur,
-   * case-insensitively. Newest matches are returned last, because a later line may correct an earlier one. Summaries are
+   * Exact search over the original lines (level 0 is never discarded, only left out of the view): every word must occur in
+   * what was said (not in the seq, actor or type that prefix a line), case-insensitively. Newest matches are returned last, because a later line may correct an earlier one. Summaries are
    * not searched: they paraphrase, and the point of a search is to get the words as they were said.
    */
   find(context: string, query: string, limit = 8): { matches: MemNode[]; total: number } {
@@ -161,7 +161,9 @@ export class CaseMemory {
     // Matched in JavaScript, not with SQL LIKE/LOWER: SQLite lowers ASCII only, so "älä" would never find "Älä" and
     // "öljy" never "ÖLJY" (Finnish and Swedish capitals).
     const rows = this.db.prepare(`SELECT * FROM nodes WHERE context=? AND level=0 ORDER BY first_seq`).all(context) as Array<Record<string, unknown>>;
-    const matches = rows.filter((r) => { const t = String(r.text).toLowerCase(); return words.every((w) => t.includes(w)); }).map((r) => this.node(r));
+    // Only the words that were said: a line is "<seq> <actor> <type>[ <id>]: <body>", and a search for "message" or "alice" must not match them all.
+    const body = (line: string) => { const i = line.indexOf(": "); return (i < 0 ? line : line.slice(i + 2)).toLowerCase(); };
+    const matches = rows.filter((r) => { const t = body(String(r.text)); return words.every((w) => t.includes(w)); }).map((r) => this.node(r));
     const n = Number.isFinite(limit) ? Math.max(0, Math.trunc(limit)) : 8;
     return { matches: matches.slice(matches.length - Math.min(n, matches.length)), total: matches.length };
   }
