@@ -196,6 +196,13 @@ export class RouterHarness implements Harness {
     const recent = await this.recentFor(api, sub);
     const ask = async (stage: ClassifyInput["stage"], offered: ClassifyInput["targets"]) => {
       const c = await this.o.classifier.classify({ submission: `${sub.ingress}#${sub.key}`, text: sub.text, sender: sub.sender, hops: sub.hops, targets: offered, stage, ...(recent ? { recent } : {}) });
+      // The classifier is not trusted: `NaN < minConfidence` and `"0.99" < minConfidence` are false, so a malformed
+      // confidence would walk straight past the gate. A bad answer is a failure of this message, never a route.
+      if (!c || typeof c !== "object") throw new ClassifierError("message", "Invalid classification: not an object");
+      if (typeof c.confidence !== "number" || !Number.isFinite(c.confidence) || c.confidence < 0 || c.confidence > 1) throw new ClassifierError("message", "Invalid classification: confidence is not a number between 0 and 1");
+      if (c.choice !== null && typeof c.choice !== "string") throw new ClassifierError("message", "Invalid classification: choice is neither an id nor null");
+      if (c.skill != null && typeof c.skill !== "string") throw new ClassifierError("message", "Invalid classification: skill is not text");
+      if (!c.probabilities || typeof c.probabilities !== "object") throw new ClassifierError("message", "Invalid classification: probabilities missing");
       stages.push({ stage, offered: offered.length, choice: c.choice, confidence: c.confidence });
       return c;
     };

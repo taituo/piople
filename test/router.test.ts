@@ -227,3 +227,31 @@ test("route-recent: a message posted in a realm itself belongs to that realm, so
   assert.deepEqual(store.routeRecent(R, "human:bob", 1e9, 3).map((r) => [r.context, r.realm]), [["realm-infra", "realm-infra"]]);
   store.close();
 });
+
+test("a malformed classifier answer never routes: NaN, missing, string or out-of-range confidence, null, wrong types", async () => {
+  const bad: Array<[string, unknown]> = [
+    ["NaN", { choice: "ch-incidents", probabilities: {}, confidence: Number.NaN }],
+    ["missing", { choice: "ch-incidents", probabilities: {} }],
+    ["string", { choice: "ch-incidents", probabilities: {}, confidence: "0.99" }],
+    ["above 1", { choice: "ch-incidents", probabilities: {}, confidence: 2 }],
+    ["negative", { choice: "ch-incidents", probabilities: {}, confidence: -1 }],
+    ["null", null],
+    ["a string", "ch-incidents"],
+    ["choice a number", { choice: 7, probabilities: {}, confidence: 1 }],
+    ["skill a number", { choice: "ch-incidents", probabilities: {}, confidence: 1, skill: 5 }],
+    ["no probabilities", { choice: "ch-incidents", confidence: 1 }],
+  ];
+  for (const [name, answer] of bad) {
+    const store = world();
+    const classifier: Classifier = { name: "fake", version: "1", async classify() { return answer as never; } };
+    const host = await hostWith(store, new RouterHarness({ classifier, mode: "enforce", minConfidence: 0.5, ruleVersion: "r1", maxAttempts: 2 }));
+    host.onError = () => {};
+    store.submitMessage("human:bob", "k1", "production outage");
+    for (let i = 0; i < 4; i++) await host.settle(2).catch(() => {});
+    assert.equal(posted(store, "ch-incidents").length, 0, `${name}: nothing delivered`);
+    const un = ingress(store, "human:bob").filter((e) => e.type === "route.unresolved").map((e) => e.data.reason);
+    assert.deepEqual(un, ["classifier-error"], `${name}: left unresolved after the attempts, not pending for ever`);
+    await host.close();
+    store.close();
+  }
+});
