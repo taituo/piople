@@ -1,34 +1,82 @@
 import { Store } from "../core/index.ts";
+import { OPS, runOp, type Args } from "../ops.ts";
+import { HttpCore } from "../http/client.ts";
 
 /**
- * G: minimal MCP server (stdio, JSON-RPC) over the piople protocol.
- * No SDK: three read tools + two gated writes, same Store rules as HTTP.
- * Identity comes from env PIO_MCP_ACTOR (set by the host); every call
- * re-checks membership/capabilities. Writes need no extra auth here
- * because propose/answer never execute side effects by themselves.
+ * Minimal MCP server (stdio, JSON-RPC, no SDK). Exposes the same OPS as the CLI, as tools named
+ * piople_<op>. Tool arguments can never change who is calling.
  *
- * Usage: PIO_DATA=./data/x.sqlite PIO_MCP_ACTOR=agent:ext node src/mcp/server.ts
+ * Local  (same machine as the database):
+ *   PIO_DATA=./data/x.sqlite PIO_ACTOR=agent:ext node src/mcp/server.ts
+ * Remote (any machine that can reach a Core over HTTP; identity is the token's actor):
+ *   PIO_CORE_URL=http://core:8899 PIO_TOKEN=pio_... node src/mcp/server.ts
  */
-const ACTOR = process.env.PIO_MCP_ACTOR ?? "agent:ext";
-const DATA = process.env.PIO_DATA ?? "./data/piople.sqlite";
-const store = new Store(DATA);
+const remoteUrl = process.env.PIO_CORE_URL;
+let actor = process.env.PIO_ACTOR ?? process.env.PIO_MCP_ACTOR ?? "agent:ext";
+let store: Store | null = null;
+let call: (op: string, args: Args) => Promise<unknown>;
 
-type Req = { jsonrpc: string; id: number | string | null; method: string; params?: { name?: string; arguments?: Record<string, unknown> } };
-
-const TOOLS = [
-  { name: "piople_events", description: "Read context events after seq", inputSchema: { type: "object", properties: { context: { type: "string" }, after: { type: "number" } }, required: ["context"] } },
-  { name: "piople_post", description: "Post a message (member+write required)", inputSchema: { type: "object", properties: { context: { type: "string" }, key: { type: "string" }, text: { type: "string" } }, required: ["context", "text"] } },
-  { name: "piople_observe", description: "Record a finding (member+write required)", inputSchema: { type: "object", properties: { context: { type: "string" }, text: { type: "string" }, evidence: { type: "array" } }, required: ["context", "text"] } },
-  { name: "piople_answer", description: "Answer an assistance request (member or invited)", inputSchema: { type: "object", properties: { context: { type: "string" }, key: { type: "string" }, requestKey: { type: "string" }, answer: { type: "string" } }, required: ["context", "requestKey", "answer"] } },
-];
-
-function ok(id: Req["id"], result: unknown) {
-  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");
+if (remoteUrl) {
+  const token = process.env.PIO_TOKEN;
+  if (!token) die("PIO_CORE_URL needs PIO_TOKEN");
+  const res = await fetch(`${remoteUrl.replace(/\/+$/, "")}/v1/whoami`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10_000) }).catch((e: Error) => die(`cannot reach ${remoteUrl}: ${e.message}`));
+  if (!res.ok) die(`${remoteUrl} refused the token (HTTP ${res.status})`);
+  const who = ((await res.json()) as { actor: string }).actor;
+  if (process.env.PIO_ACTOR && process.env.PIO_ACTOR !== who) die(`PIO_ACTOR=${process.env.PIO_ACTOR} but the token belongs to ${who}`);
+  actor = who;
+  const core = new HttpCore(remoteUrl, { [actor]: token });
+  call = (op, args) => core.call(actor, op, args);
+} else {
+  store = new Store(process.env.PIO_DATA ?? "./data/piople.sqlite");
+  const local = store;
+  call = async (op, args) => runOp(local, actor, op, args);
 }
-function err(id: Req["id"], code: number, message: string) {
-  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, error: { code, message: String(message).slice(0, 300) } }) + "\n");
+
+function die(message: string): never {
+  process.stderr.write(`piople-mcp: ${message}\n`);
+  process.exit(1);
 }
 
+type Req = { jsonrpc: string; id?: number | string | null; method: string; params?: { name?: string; arguments?: Record<string, unknown> } };
+
+const TOOLS = Object.entries(OPS).map(([name, o]) => ({
+  name: `piople_${name.replace(/-/g, "_")}`,
+  description: o.description,
+  inputSchema: {
+    type: "object",
+    properties: Object.fromEntries([...o.required, ...(o.optional ?? [])].map((k) => [k, { type: "string" }])),
+    required: o.required,
+  },
+}));
+const BY_TOOL = new Map(Object.keys(OPS).map((n) => [`piople_${n.replace(/-/g, "_")}`, n]));
+
+const send = (msg: unknown) => process.stdout.write(JSON.stringify(msg) + "\n");
+const ok = (id: Req["id"], result: unknown) => send({ jsonrpc: "2.0", id, result });
+const err = (id: Req["id"], code: number, message: string) => send({ jsonrpc: "2.0", id, error: { code, message: message.slice(0, 300) } });
+
+async function handle(req: Req) {
+  if (req.id === undefined) return; // notification
+  if (req.method === "initialize") {
+    return ok(req.id, { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "piople", version: "0.0.1" } });
+  }
+  if (req.method === "tools/list") return ok(req.id, { tools: TOOLS });
+  if (req.method === "tools/call") {
+    const op = BY_TOOL.get(req.params?.name ?? "");
+    if (!op) return err(req.id, -32602, `unknown tool: ${req.params?.name}`);
+    try {
+      const out = await call(op, req.params?.arguments ?? {});
+      return ok(req.id, { content: [{ type: "text", text: JSON.stringify(out) }] });
+    } catch (e) {
+      // Protocol refusals are tool results, so the calling agent can see and react to them.
+      return ok(req.id, { isError: true, content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }] });
+    }
+  }
+  return err(req.id, -32601, `unknown method: ${req.method}`);
+}
+
+// Tool calls run one after another (a call over the network can be slow); everything else is
+// answered at once, so one slow call never makes the server look dead to its client.
+let queue: Promise<void> = Promise.resolve();
 let buf = "";
 process.stdin.on("data", (d: Buffer) => {
   buf += d.toString("utf8");
@@ -38,40 +86,13 @@ process.stdin.on("data", (d: Buffer) => {
     if (!line.trim()) continue;
     let req: Req;
     try {
-      req = JSON.parse(line);
+      req = JSON.parse(line) as Req;
     } catch {
+      err(null, -32700, "parse error");
       continue;
     }
-    try {
-      if (req.method === "initialize") {
-        ok(req.id, { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "piople", version: "0.0.1" } });
-      } else if (req.method === "tools/list") {
-        ok(req.id, { tools: TOOLS });
-      } else if (req.method === "tools/call") {
-        const name = req.params?.name ?? "";
-        const a = req.params?.arguments ?? {};
-        if (name === "piople_events") {
-          if (!store.isMember(String(a.context), ACTOR)) throw new Error("not-a-member");
-          ok(req.id, { content: [{ type: "text", text: JSON.stringify(store.eventsSince(String(a.context), Number(a.after ?? 0))) }] });
-        } else if (name === "piople_post") {
-          const ev = store.postMessage(String(a.context), ACTOR, String(a.key ?? `mcp:${Date.now()}`), String(a.text));
-          ok(req.id, { content: [{ type: "text", text: JSON.stringify(ev) }] });
-        } else if (name === "piople_observe") {
-          const ev = store.recordObservation({ id: `mcp:${Date.now()}`, contextId: String(a.context), kind: "finding", authorId: ACTOR, text: String(a.text), status: "hypothesis", evidence: (a.evidence as string[]) ?? [], createdAt: Date.now() });
-          ok(req.id, { content: [{ type: "text", text: JSON.stringify(ev) }] });
-        } else if (name === "piople_answer") {
-          const ev = store.answerAssistance(String(a.context), ACTOR, String(a.key ?? `mcp:${Date.now()}`), String(a.requestKey), String(a.answer), []);
-          ok(req.id, { content: [{ type: "text", text: JSON.stringify(ev) }] });
-        } else {
-          err(req.id, -32602, `unknown tool: ${name}`);
-        }
-      } else if (req.method === "notifications/initialized") {
-        // no-op
-      } else {
-        err(req.id, -32601, `unknown method: ${req.method}`);
-      }
-    } catch (e) {
-      err(req.id, -32000, e instanceof Error ? e.message : "error");
-    }
+    if (req.method === "tools/call") queue = queue.then(async () => { await handle(req); });
+    else void handle(req);
   }
 });
+process.stdin.on("end", () => void queue.then(() => store?.close()));
