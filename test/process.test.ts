@@ -70,12 +70,16 @@ test("16 concurrent writer processes: no lock errors, no lost or duplicated even
       p.on("close", (code) => resolve({ code, err }));
     });
   assert.equal((await run("human:alice", "create", "--id", "c1", "--title", "t")).code, 0);
-  // Half the writers replay an already-used key: they must collapse to one event.
-  const results = await Promise.all(Array.from({ length: 16 }, (_, i) => run("human:alice", "post", "--context", "c1", "--text", `m${i}`, "--key", `k${i % 8}`)));
+  // Half the writers replay an already-used key with the same request: they must collapse to one event.
+  const results = await Promise.all(Array.from({ length: 16 }, (_, i) => run("human:alice", "post", "--context", "c1", "--text", `m${i % 8}`, "--key", `k${i % 8}`)));
   assert.deepEqual(results.filter((r) => r.code !== 0), []);
   const out = execFileSync(process.execPath, ["--no-warnings", "src/cli/main.ts", "--db", db2, "--as", "human:alice", "events", "--context", "c1"], { encoding: "utf8" });
   const posted = (JSON.parse(out) as Array<{ type: string }>).filter((e) => e.type === "message.posted");
   assert.equal(posted.length, 8);
+  // The same key with another request is a conflict, not a silent replay (since the call hash).
+  const other = await run("human:alice", "post", "--context", "c1", "--text", "something else", "--key", "k0");
+  assert.equal(other.code, 1);
+  assert.match(other.err, /key-conflict: k0 in c1 was already used for a different request/);
 });
 
 test("cli: inbox shows what happened while away; ack persists across processes", () => {

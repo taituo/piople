@@ -71,7 +71,10 @@ PIO_CORE_URL=http://core:8899 PIO_TOKEN=pio_... node --no-warnings src/mcp/serve
 - **One write path.** Every mutation runs in a single `BEGIN IMMEDIATE`
   transaction: check, idempotency lookup, side-table writes, event insert.
   Replaying a key returns the original event and writes nothing; the same key
-  for another operation or actor is a `key-conflict`. A failed write leaves no
+  for another operation or actor is a `key-conflict`. A key the caller chose itself (`--key`, an HTTP or MCP `key`)
+  also names one request: the same key with different content is a `key-conflict` too (a hash of the request is kept
+  with the event). Keys a host derives for its own steps, and the deterministic defaults, still replay whatever comes
+  back, because a retried step may legitimately send other content. A failed write leaves no
   half-done rows. Concurrent processes on one SQLite file queue on the write
   lock (`busy_timeout`) instead of failing.
 - `events` is append-only (SQLite triggers).
