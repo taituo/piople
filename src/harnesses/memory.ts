@@ -194,11 +194,18 @@ export class CaseMemory {
     let omitted = 0;
     const protectedIds = new Set(nodes.filter((n) => n.level === 0).slice(-3).map((n) => n.id));
     const order = nodes.filter((n) => !protectedIds.has(n.id)).sort((a, b) => a.level - b.level || a.firstSeq - b.firstSeq);
+    // A running total, not a fresh render per dropped entry: re-rendering the whole list for each one was quadratic (8,000
+    // uncovered events took 2 s per view, and the backlog is exactly what grows while the summariser is down).
+    const len = new Map(nodes.map((n) => [n.id, line(n, n.level === 0 ? cap : cap + 300).length + 1]));
+    let total = size(render(nodes, cap)) + size(pinLines(cap));
+    const dropped = new Set<string>();
     for (const drop of order) {
-      if (size(render(nodes, cap)) + size(pinLines(cap)) <= budget) break;
-      nodes = nodes.filter((n) => n.id !== drop.id);
+      if (total <= budget) break;
+      dropped.add(drop.id);
+      total -= len.get(drop.id)!;
       omitted++;
     }
+    if (dropped.size) nodes = nodes.filter((n) => !dropped.has(n.id));
     const out = [
       ...(omitted ? [`(${omitted} detailed entries left out to fit; the summaries above still cover them: ZOOM one to read them)`] : []),
       ...render(nodes, cap),

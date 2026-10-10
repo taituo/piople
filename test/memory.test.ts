@@ -191,3 +191,17 @@ test("find: only the words that were said match, not the seq, actor or type that
   assert.deepEqual(m.find("c1", "5433").matches.map((x) => x.id), ["e1"]);
   m.close();
 });
+
+test("view stays fast when the summariser has been down and thousands of events are still uncovered", () => {
+  const m = CaseMemory.open(":memory:", { summarizer: extractiveSummarizer(), k: 8, recent: 20 });
+  const ev = (seq: number): MemEvent => ({ seq, actorId: "human:a", type: "message.posted", data: { text: `message number ${seq} with some ordinary words in it` } });
+  m.ingest("c", Array.from({ length: 12_000 }, (_, i) => ev(i + 1))); // never compacted
+  const t0 = Date.now();
+  const v = m.view("c", 1500);
+  const took = Date.now() - t0;
+  assert.ok(took < 400, `took ${took} ms (re-rendering the list for every dropped entry needed about 5 s for 12,000)`);
+  assert.ok(v.text.length <= 1500 * 4 + 400, "and it still fits the budget");
+  assert.match(v.text, /\[e12000\]/, "the newest event is shown");
+  assert.match(v.text, /\[e11998\]/, "so are the newest three");
+  m.close();
+});
