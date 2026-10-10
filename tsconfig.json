@@ -8,6 +8,7 @@
     "declaration": true,
     "allowImportingTsExtensions": true,
     "noEmit": true,
+    "erasableSyntaxOnly": true,
     "skipLibCheck": true
   },
   "include": ["src/**/*.ts", "test/**/*.ts"]

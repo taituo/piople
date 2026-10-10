@@ -1,0 +1,36 @@
+import type { InboxDetail, Pending } from "../core/index.ts";
+import type { Args } from "../ops.ts";
+
+/**
+ * How a host talks to Core. In-process today (LocalCore); an HTTP client in phase D.
+ * Everything a harness does goes through this, as its own actor.
+ */
+export interface CoreClient {
+  call(as: string, op: string, args?: Args): Promise<unknown>;
+}
+
+/** One delivery to a harness: what is new in one context, and what is owed. */
+export type Step = {
+  actor: string;
+  context: string;
+  /** Events after the actor's cursor, all actors, own included. */
+  events: InboxDetail["events"];
+  pending: Pending;
+  /**
+   * Run an op as this actor. `context` defaults to this step's context. Missing idempotency
+   * keys/ids are derived from (actor, context, cursor, call number), so if the step is retried
+   * after a partial failure the same calls replay instead of duplicating.
+   */
+  run<T = any>(op: string, args?: Args): Promise<T>;
+};
+
+/**
+ * The participation contract. A harness turns what is new into protocol actions.
+ * Delivery is at-least-once: the cursor moves only after step() returns.
+ * A harness owns its private state (conversation, memory); Core owns identity, membership,
+ * authorization and history.
+ */
+export interface Harness {
+  step(s: Step): Promise<void>;
+  close?(): Promise<void> | void;
+}

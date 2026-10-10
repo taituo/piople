@@ -11,6 +11,8 @@ type Op = {
   description: string;
   required: string[];
   optional?: string[];
+  /** The optional `id` names a new object (not an existing one): a host may derive a stable one for retries. */
+  mintsId?: boolean;
   run(s: Store, as: string, a: Args): unknown;
 };
 
@@ -38,6 +40,7 @@ export const OPS: Record<string, Op> = {
     },
   },
   create: {
+    mintsId: true,
     description: "Create a case context; the caller joins with read,write,decide",
     required: ["title"], optional: ["id", "goal"],
     run: (s, as, a) => s.createContext({ id: a.id == null ? `case-${randomUUID().slice(0, 8)}` : str(a, "id"), kind: "case", title: str(a, "title"), goal: a.goal == null ? "" : str(a, "goal"), createdAt: Date.now() }, as),
@@ -65,6 +68,7 @@ export const OPS: Record<string, Op> = {
     run: (s, as, a) => ({ cursor: s.ack(str(a, "context"), as, Number(a.seq)) }),
   },
   "work-request": {
+    mintsId: true,
     description: "Ask for work, addressed to an actor (--to) and/or anyone declaring a skill (--skill)",
     required: ["context", "input"], optional: ["to", "skill", "id"],
     run: (s, as, a) => {
@@ -98,6 +102,7 @@ export const OPS: Record<string, Op> = {
     run: (s, as, a) => s.postMessage(str(a, "context"), as, key(a), str(a, "text")),
   },
   observe: {
+    mintsId: true,
     description: "Record a finding (status hypothesis)",
     required: ["context", "text"], optional: ["evidence", "id"],
     run: (s, as, a) => s.recordObservation({ id: a.id == null ? `obs-${randomUUID().slice(0, 8)}` : str(a, "id"), contextId: str(a, "context"), kind: "finding", authorId: as, text: str(a, "text"), status: "hypothesis", evidence: list(a.evidence), createdAt: Date.now() }),
@@ -118,6 +123,7 @@ export const OPS: Record<string, Op> = {
     run: (s, as, a) => s.answerAssistance(str(a, "context"), as, key(a), str(a, "request"), str(a, "answer"), list(a.evidence)),
   },
   "decision-request": {
+    mintsId: true,
     description: "Open a decision",
     required: ["context", "question"], optional: ["options", "id"],
     run: (s, as, a) => s.requestDecision({ id: a.id == null ? `d-${randomUUID().slice(0, 8)}` : str(a, "id"), contextId: str(a, "context"), question: str(a, "question"), options: a.options == null ? ["yes", "no"] : list(a.options), requestedBy: as, decidedBy: null, answer: null, status: "open", createdAt: Date.now(), resolvedAt: null }),
