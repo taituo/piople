@@ -27,8 +27,29 @@ const derive = (prefix: string, key: string) => `${prefix}-${createHash("sha256"
 export const workIdFor = (key: string) => derive("tw", key);
 export const decisionIdFor = (key: string) => derive("td", key);
 
+/**
+ * What Core refuses for good, as opposed to what may pass. Temporal retries an Activity for ever unless told
+ * otherwise, so a request that Core will refuse every time (too large, malformed, an unknown case, an id already in
+ * use with other content) would loop silently with the workflow stuck. Those become non-retryable failures that the
+ * workflow can see. Left retryable on purpose: no answer, 5xx, 429 (limits ease), and 401/403 (an operator can fix a
+ * token or a membership while the Activity keeps trying).
+ */
+const PERMANENT = /^(missing|bad-[a-z]+|too-large|unknown-[a-z]+|key-conflict|id-in-use|decision-not-open|work-needs-target)\b/;
+function classify(e: unknown, op: string): unknown {
+  const status = (e as { status?: unknown }).status;
+  const message = e instanceof Error ? e.message : String(e);
+  const permanent = typeof status === "number" ? [400, 404, 409, 413].includes(status) : PERMANENT.test(message);
+  return permanent ? ApplicationFailure.nonRetryable(`Core refused ${op} for good: ${message.slice(0, 300)}`, "CoreRefused") : e;
+}
+
 export function createActivities(core: CoreClient, actor: string, o: { pollMs?: number } = {}): PiopleActivities {
-  const call = <T = any>(op: string, args: Record<string, unknown>) => core.call(actor, op, args) as Promise<T>;
+  const call = async <T = any>(op: string, args: Record<string, unknown>): Promise<T> => {
+    try {
+      return (await core.call(actor, op, args)) as T;
+    } catch (e) {
+      throw classify(e, op);
+    }
+  };
   const pause = (ms: number) => Context.current().sleep(ms); // rejects when the Activity is cancelled
   return {
     async requestWork({ context, to, input, key }) {
