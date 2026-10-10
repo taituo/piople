@@ -164,3 +164,13 @@ test("a bad cursor is an error, not an empty answer; a lease has an upper bound"
   assert.ok(ok.work.leaseUntil - Date.now() <= MAX_LEASE_MS, "the longest lease is allowed");
   store.close();
 });
+
+test("declared skills are bounded: 100 at most, 200 characters each", async () => {
+  const { as, store } = world();
+  const bob = as("agent:bob");
+  await bob("actor", { skills: Array.from({ length: 100 }, (_, i) => `s${i}`).join(",") });
+  await assert.rejects(bob("actor", { skills: Array.from({ length: 101 }, (_, i) => `s${i}`).join(",") }), /bad-skills/);
+  await assert.rejects(bob("actor", { skills: "x".repeat(201) }), /bad-skills/);
+  assert.equal(JSON.parse((store.db.prepare("SELECT skills FROM actors WHERE id='agent:bob'").get() as { skills: string }).skills).length, 100, "the refused calls changed nothing");
+  store.close();
+});

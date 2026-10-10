@@ -626,7 +626,10 @@ export class Store {
 
   /** Skills are self-declared routing hints. They never grant anything. */
   setSkills(actorId: Id, skills: string[]): void {
-    const info = this.db.prepare(`UPDATE actors SET skills=? WHERE id=?`).run(JSON.stringify([...new Set(skills)].sort()), actorId);
+    // Declared skills are read on every claim check: bound them, so one actor cannot make that work grow without limit.
+    const unique = [...new Set(skills)];
+    if (unique.length > 100 || unique.some((k) => k.length > 200)) throw new Error(`bad-skills: at most 100 skills of at most 200 characters each`);
+    const info = this.db.prepare(`UPDATE actors SET skills=? WHERE id=?`).run(JSON.stringify(unique.sort()), actorId);
     if (info.changes !== 1) throw new Error(`unknown-actor: ${actorId}`);
   }
 
