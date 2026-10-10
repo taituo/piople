@@ -318,9 +318,22 @@ await PiHarness.open({ /* ... */, memory: {
   *real* model summarises and navigates is not measured here; do it as routing is measured, not assumed.
 - Each delivery is its own small durable Pi conversation; they accumulate in the Pi store (not pruned yet).
 
-Not yet: a continuously-running human harness (a human uses the CLI, which is a
-short-lived participant), environments (tools/filesystem/network per harness), and
-anything over a network — `CoreClient` is the seam for that (phase D).
+### A human as a running participant
+
+```sh
+node src/hosts/watch.ts --as human:alice --db ./data/p.sqlite                      # next to the database
+PIO_TOKEN=pio_... node src/hosts/watch.ts --as human:alice --url http://core:8899   # over HTTP
+```
+
+`HumanHarness` (`src/harnesses/human.ts`) shows what is new and what is owed (asks, decisions you may resolve,
+work you may take or hold) and reads commands: `say`, `answer <key> | <text>`, `decide <id> <option>`, `claim`,
+`done`, `fail`, `help`. An empty line or Ctrl-D leaves; **looking resolves nothing**, so whatever is still owed
+stays pending in Core. No model, and no extra power: every command is an ordinary op run as that actor, so
+deciding still needs `decide` (a `human:*` name grants nothing, and an agent with the same harness is judged the
+same way). I/O goes through a `Console` interface (`scriptedConsole` in tests); the CLI one-shot commands are
+unchanged. The host takes the actor's lease, so one `watch` per person at a time.
+
+Not yet: environments (tools/filesystem/network per harness).
 
 ### One host per actor
 
@@ -377,7 +390,6 @@ const host = new Host(core);
 ## Not built yet
 
 - Per-harness **environments** (filesystem, network, tools) and their enforcement at the OS/container level.
-- A continuously running **human harness** (a human uses the CLI, a short-lived participant).
 - **Kubernetes / Temporal** adapters.
 - Push delivery (SSE/long-poll), signature-based identity, a multi-node Core.
 

@@ -13,6 +13,7 @@
     "test": "node --test test/*.test.ts",
     "serve": "node src/http/main.ts",
     "admin": "node src/cli/admin.ts",
+    "watch": "node src/hosts/watch.ts",
     "eval": "node src/eval/main.ts"
   },
   "devDependencies": {
