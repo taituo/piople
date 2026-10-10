@@ -148,3 +148,19 @@ test("comma-separated lists are trimmed: options 'yes, no' means yes and no, cap
   assert.deepEqual(JSON.parse((store.db.prepare("SELECT capabilities FROM members WHERE actor_id='human:bob'").get() as { capabilities: string }).capabilities), ["read", "write"]);
   store.close();
 });
+
+test("a bad cursor is an error, not an empty answer; a lease has an upper bound", async () => {
+  const { alice, store } = world();
+  await alice("create", { id: "c1", title: "t" });
+  await alice("post", { context: "c1", text: "m" });
+  for (const bad of ["abc", "Infinity", "NaN"]) await assert.rejects(alice("events", { context: "c1", after: bad }), /bad-seq/, bad);
+  assert.equal((await alice("events", { context: "c1", after: "0" })).length, 2);
+  assert.equal((await alice("events", { context: "c1", after: "-5" })).length, 2, "a negative cursor reads from the start");
+  assert.equal((await alice("events", { context: "c1" })).length, 2, "no cursor reads from the start");
+  const { MAX_LEASE_MS } = await import("../src/core/store.ts");
+  await alice("work-request", { context: "c1", id: "w1", to: "human:alice", input: "{}" });
+  for (const bad of [MAX_LEASE_MS + 1, 99_999_999_999_999]) await assert.rejects(alice("work-claim", { context: "c1", id: "w1", "lease-ms": bad }), /bad-lease/, String(bad));
+  const ok = await alice("work-claim", { context: "c1", id: "w1", "lease-ms": MAX_LEASE_MS });
+  assert.ok(ok.work.leaseUntil - Date.now() <= MAX_LEASE_MS, "the longest lease is allowed");
+  store.close();
+});

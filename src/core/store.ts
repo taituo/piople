@@ -164,8 +164,10 @@ type Mutation = {
 
 /** One read never returns more than this many events; page with the cursor. */
 export const MAX_READ = 1000;
+/** The longest claim lease: a holder that dies keeps its work this long at most. Without a bound, 1e14 ms (3000 years) made a claim permanent. */
+export const MAX_LEASE_MS = 7 * 24 * 3600 * 1000;
 const checkLease = (leaseMs: number | undefined) => {
-  if (leaseMs !== undefined && !(Number.isInteger(leaseMs) && leaseMs > 0)) throw new Error(`bad-lease: ${leaseMs} (positive whole milliseconds)`);
+  if (leaseMs !== undefined && !(Number.isInteger(leaseMs) && leaseMs > 0 && leaseMs <= MAX_LEASE_MS)) throw new Error(`bad-lease: ${leaseMs} (whole milliseconds, 1 to ${MAX_LEASE_MS})`);
 };
 const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
 
@@ -1107,6 +1109,8 @@ export class Store {
   }
 
   readEvents(contextId: Id, actorId: Id, afterSeq: number, limit = 200): PiopleEvent[] {
+    // A cursor that is not a number must not read as "nothing new": `seq > NaN` matches nothing, and a reader would wait for ever.
+    if (typeof afterSeq !== "number" || Number.isNaN(afterSeq) || afterSeq === Infinity) throw new Error(`bad-seq: ${String(afterSeq)}`);
     this.mustMember(contextId, actorId, "read");
     return this.eventsSince(contextId, afterSeq, limit);
   }
