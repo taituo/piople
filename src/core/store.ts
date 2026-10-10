@@ -464,33 +464,35 @@ export class Store {
     });
   }
 
+  /**
+   * Who may answer an ask: a member who can write, or the actor the ask is addressed to. An addressee who is not a
+   * member (an invited expert) answers that ask once, and only if they never were a member here (removal ends access: an
+   * old invitation must not outlive it). Experts cannot answer asks addressed to others, which would clear another
+   * actor's pending item, and cannot answer again and again.
+   */
   answerAssistance(contextId: Id, actorId: Id, key: string, requestKey: string, answer: string, evidence: string[]): PiopleEvent {
     return this.mutate({
-      type: "assistance.answered", contextId, actorId, key,
+      type: "assistance.answered", contextId, actorId, key, replayFirst: true,
       check: () => {
-        if (!this.isMember(contextId, actorId) && !this.isInvitedExpert(contextId, actorId)) {
-          throw new Error(`not-a-member: ${actorId} not in ${contextId}`);
-        }
+        const ask = this.db.prepare(`SELECT data FROM events WHERE context_id=? AND key=? AND type='assistance.requested'`).get(contextId, requestKey) as { data: string } | undefined;
+        let to: string | undefined;
+        try { to = ask ? (JSON.parse(ask.data) as { to?: string }).to : undefined; } catch { /* malformed: nobody is addressed */ }
+        const caps = this.caps(contextId, actorId);
+        const addressee = to === actorId;
+        const wasMember = !!this.db.prepare(`SELECT 1 FROM events WHERE context_id=? AND type='member.joined' AND actor_id=? LIMIT 1`).get(contextId, actorId);
+        if (caps === undefined && !(addressee && !wasMember)) throw new Error(`not-a-member: ${actorId} not in ${contextId}`);
+        if (caps !== undefined && !caps.includes("write") && !addressee) throw new Error(`forbidden: ${actorId} lacks write in ${contextId} and the ask is not addressed to them`);
         // An answer needs an ask to answer. Without this a wrong key (say, an event number) was accepted and the answer vanished.
-        if (!this.db.prepare(`SELECT 1 FROM events WHERE context_id=? AND key=? AND type='assistance.requested'`).get(contextId, requestKey)) {
-          throw new Error(`unknown-request: ${requestKey} is not an ask in ${contextId}`);
+        if (!ask) throw new Error(`unknown-request: ${requestKey} is not an ask in ${contextId}`);
+        if (caps === undefined) {
+          const again = this.db.prepare(`SELECT 1 FROM events WHERE context_id=? AND type='assistance.answered' AND actor_id=? AND json_extract(data,'$.requestKey')=? LIMIT 1`).get(contextId, actorId, requestKey);
+          if (again) throw new Error(`already-answered: ${actorId} has answered ${requestKey} (an invited expert answers once)`);
         }
       },
       write: () => ({ requestKey, answer, evidence }),
     });
   }
 
-  /** An expert named in an assistance.requested may answer once without membership. */
-  private isInvitedExpert(contextId: string, actorId: string): boolean {
-    const rows = this.db.prepare(`SELECT data FROM events WHERE context_id=? AND type='assistance.requested'`).all(contextId) as Array<{ data: string }>;
-    return rows.some((r) => {
-      try {
-        return (JSON.parse(r.data) as { to?: string }).to === actorId;
-      } catch {
-        return false;
-      }
-    });
-  }
 
   requestDecision(d: Decision): PiopleEvent {
     return this.mutate({
