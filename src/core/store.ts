@@ -53,7 +53,24 @@ CREATE TABLE presence (
   actor_id TEXT PRIMARY KEY, state TEXT NOT NULL, echo INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL);
 `,
+  // Migration 5: per-actor read cursor. Private state, not an event: a harness that is
+  // not running between sessions still needs somewhere durable to resume from.
+  `
+CREATE TABLE cursors (
+  context_id TEXT NOT NULL REFERENCES contexts(id), actor_id TEXT NOT NULL,
+  acked_seq INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
+  PRIMARY KEY (context_id, actor_id));
+`,
 ];
+
+export type InboxSummary = { context: Id; title: string; cursor: number; unread: number; pending: number };
+export type Pending = {
+  /** assistance.requested addressed to me with no assistance.answered for its key */
+  assistance: Array<{ key: string; from: Id; question: string; seq: number }>;
+  /** open decisions I may resolve (needs decide, and not an echo delegate) */
+  decisions: Array<{ id: Id; question: string; options: string[]; requestedBy: Id }>;
+};
+export type InboxDetail = { context: Id; cursor: number; events: PiopleEvent[]; pending: Pending };
 
 type Row = { seq: number; ts: number; type: string; context_id: string; actor_id: string; key: string; data: string };
 type Mutation = {
@@ -323,6 +340,60 @@ export class Store {
         return { artifactId, status };
       },
     });
+  }
+
+  /**
+   * Move my read cursor forward (never back, never past the end of the log).
+   * Acknowledging is not resolving: pending items are derived from open state, not from the cursor.
+   */
+  ack(contextId: Id, actorId: Id, seq: number): number {
+    this.mustMember(contextId, actorId, "read");
+    if (!Number.isInteger(seq) || seq < 0) throw new Error(`bad-seq: ${seq}`);
+    return this.tx(() => {
+      const end = (this.db.prepare(`SELECT COALESCE(MAX(seq),0) m FROM events WHERE context_id=?`).get(contextId) as { m: number }).m;
+      this.db.prepare(`INSERT INTO cursors(context_id,actor_id,acked_seq,updated_at) VALUES(?,?,?,?)
+        ON CONFLICT(context_id,actor_id) DO UPDATE SET acked_seq=MAX(acked_seq, excluded.acked_seq), updated_at=excluded.updated_at`).run(contextId, actorId, Math.min(seq, end), Date.now());
+      return this.cursor(contextId, actorId);
+    });
+  }
+
+  cursor(contextId: Id, actorId: Id): number {
+    const r = this.db.prepare(`SELECT acked_seq a FROM cursors WHERE context_id=? AND actor_id=?`).get(contextId, actorId) as { a: number } | undefined;
+    return r?.a ?? 0;
+  }
+
+  /** Everything an actor owes attention in one context, derived from open state. */
+  pending(contextId: Id, actorId: Id): Pending {
+    const asks = this.db.prepare(`
+      SELECT r.key, r.actor_id AS from_actor, r.seq, json_extract(r.data,'$.question') AS question FROM events r
+      WHERE r.context_id=? AND r.type='assistance.requested' AND json_extract(r.data,'$.to')=?
+        AND NOT EXISTS (SELECT 1 FROM events a WHERE a.context_id=r.context_id AND a.type='assistance.answered' AND json_extract(a.data,'$.requestKey')=r.key)
+      ORDER BY r.seq`).all(contextId, actorId) as Array<{ key: string; from_actor: string; seq: number; question: string }>;
+    const echo = (this.db.prepare(`SELECT echo FROM presence WHERE actor_id=?`).get(actorId) as { echo: number } | undefined)?.echo;
+    const canDecide = !!this.caps(contextId, actorId)?.includes("decide") && !echo;
+    const decisions = canDecide
+      ? (this.db.prepare(`SELECT id, question, options, requested_by FROM decisions WHERE context_id=? AND status='open' ORDER BY created_at`).all(contextId) as Array<{ id: string; question: string; options: string; requested_by: string }>)
+          .map((d) => ({ id: d.id, question: d.question, options: JSON.parse(d.options) as string[], requestedBy: d.requested_by }))
+      : [];
+    return { assistance: asks.map((a) => ({ key: a.key, from: a.from_actor, question: a.question, seq: a.seq })), decisions };
+  }
+
+  /** What happened while I was away, across every context I can read. */
+  inbox(actorId: Id): InboxSummary[] {
+    const ctxs = this.db.prepare(`SELECT c.id, c.title FROM contexts c JOIN members m ON m.context_id=c.id WHERE m.actor_id=? ORDER BY c.created_at, c.id`).all(actorId) as Array<{ id: string; title: string }>;
+    return ctxs.filter((c) => this.caps(c.id, actorId)!.includes("read")).map((c) => {
+      const cursor = this.cursor(c.id, actorId);
+      const unread = (this.db.prepare(`SELECT COUNT(*) n FROM events WHERE context_id=? AND seq>? AND actor_id<>?`).get(c.id, cursor, actorId) as { n: number }).n;
+      const p = this.pending(c.id, actorId);
+      return { context: c.id, title: c.title, cursor, unread, pending: p.assistance.length + p.decisions.length };
+    });
+  }
+
+  /** Events after my cursor (all actors, mine included) plus what is pending for me. */
+  inboxOf(contextId: Id, actorId: Id, limit = 200): InboxDetail {
+    this.mustMember(contextId, actorId, "read");
+    const cursor = this.cursor(contextId, actorId);
+    return { context: contextId, cursor, events: this.eventsSince(contextId, cursor, limit), pending: this.pending(contextId, actorId) };
   }
 
   /** Unchecked read, for internal and test use. Actors go through readEvents. */

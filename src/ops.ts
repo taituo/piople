@@ -44,6 +44,16 @@ export const OPS: Record<string, Op> = {
       return s.readEvents(str(a, "context"), as, Number(a.after ?? 0), Number(a.limit ?? 200));
     },
   },
+  inbox: {
+    description: "What I owe attention: without --context a summary of all my cases; with it the events after my cursor plus pending asks and decisions",
+    required: [], optional: ["context", "limit"],
+    run: (s, as, a) => (a.context == null ? s.inbox(as) : s.inboxOf(str(a, "context"), as, Number(a.limit ?? 200))),
+  },
+  ack: {
+    description: "Move my read cursor forward to --seq (never back). Does not resolve pending items",
+    required: ["context", "seq"],
+    run: (s, as, a) => ({ cursor: s.ack(str(a, "context"), as, Number(a.seq)) }),
+  },
   post: {
     description: "Post a message",
     required: ["context", "text"], optional: ["key"],

@@ -76,3 +76,18 @@ test("16 concurrent writer processes: no lock errors, no lost or duplicated even
   const posted = (JSON.parse(out) as Array<{ type: string }>).filter((e) => e.type === "message.posted");
   assert.equal(posted.length, 8);
 });
+
+test("cli: inbox shows what happened while away; ack persists across processes", () => {
+  const db3 = join(mkdtempSync(join(tmpdir(), "piople-")), "i.sqlite");
+  const run = (as: string, ...args: string[]) => JSON.parse(execFileSync(process.execPath, ["--no-warnings", "src/cli/main.ts", "--db", db3, "--as", as, ...args], { encoding: "utf8" })) as any;
+  run("human:alice", "create", "--id", "c1", "--title", "Checkout down");
+  run("human:alice", "join", "--context", "c1", "--actor", "agent:scout", "--caps", "read,write");
+  run("agent:scout", "decision-request", "--context", "c1", "--id", "d1", "--question", "patch?");
+  const summary = run("human:alice", "inbox");
+  assert.deepEqual(summary.map((x: any) => [x.context, x.unread, x.pending]), [["c1", 2, 1]]);
+  const detail = run("human:alice", "inbox", "--context", "c1");
+  assert.equal(detail.pending.decisions[0].id, "d1");
+  assert.deepEqual(run("human:alice", "ack", "--context", "c1", "--seq", String(detail.events.at(-1).seq)), { cursor: detail.events.at(-1).seq });
+  assert.deepEqual(run("human:alice", "inbox", "--context", "c1").events, []);
+  assert.equal(run("human:alice", "inbox")[0].pending, 1);
+});
