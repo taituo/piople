@@ -13,7 +13,7 @@ of the first version were removed; the full history up to `c5a5b16` stays in git
 ## Concepts
 
 `Actor` (`human:*` / `agent:*`), `Context` (kind=case), `Event` (append-only), `Artifact`.
-Events: `context.created, member.joined, message.posted, observation.recorded,
+Events: `context.created, member.joined, member.removed, message.posted, observation.recorded,
 observation.promoted, assistance.requested/answered, decision.requested/resolved,
 work.requested/claimed/completed/failed, message.submitted, route.classified/resolved/shadowed/unresolved,
 action.proposed/executed, presence.changed`.
@@ -104,8 +104,24 @@ piople --as human:bob   targets    # what I may address: contexts I can write to
   without a realm behave exactly as before.
 - `inbox` shows each context's `kind` and `realm`.
 
-Not yet: removing members, and routing (choosing the realm/channel/recipient for a message) — see the
-routing plan; Core only provides the addressing (`targets`) and the rules above.
+### Removing members
+
+```sh
+piople --as human:alice remove-member --context ch-1 --actor agent:carol   # needs decide
+piople --as agent:carol leave --context ch-1                                # my own membership
+```
+
+- **Immediate and visible**: access (read, write, inbox, targets) ends at once and a `member.removed` event is
+  written. History stays readable by the others.
+- **Never the last decider**: removing the last effective holder of `decide` is refused (`forbidden`), so no
+  context is left that nobody can govern.
+- **A realm removal cascades**: the actor leaves every context inside the realm in the same transaction, one
+  `member.removed` (reason `realm-removed`) per context. Re-adding them to the realm does not restore old roles.
+- **Held work is reopened** with its attempt kept; someone else can claim it (attempt + 1). Their read cursor is
+  dropped. Identity, tokens and presence are untouched: membership is not identity.
+- A rejoin after a removal is a new join (the default join key includes the number of removals).
+
+Core provides the addressing (`targets`) and the rules above; routing is below.
 
 ### Routing: saying a message without saying where it goes
 

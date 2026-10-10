@@ -334,6 +334,60 @@ export class Store {
     });
   }
 
+  /**
+   * Remove a member (`by` needs decide) or leave (`by` is the member). Immediate and visible: one member.removed
+   * event per context. Removing someone from a realm removes them from every context inside it in the same
+   * transaction, otherwise re-adding them to the realm would silently restore their old roles. Never removes the
+   * last effective decider of a context (nobody could govern it afterwards). Work they hold is reopened with its
+   * attempt kept, and their read cursor is dropped. Identity, tokens and presence are untouched.
+   */
+  removeMember(contextId: Id, target: Id, key: string, by: Id): PiopleEvent {
+    const affected = (): Id[] => {
+      const inner = this.contextRow(contextId)?.kind === "realm"
+        ? (this.db.prepare(`SELECT c.id FROM contexts c JOIN members m ON m.context_id=c.id WHERE c.realm_id=? AND m.actor_id=? ORDER BY c.rowid`).all(contextId, target) as Array<{ id: Id }>).map((r) => r.id)
+        : [];
+      return [contextId, ...inner];
+    };
+    return this.mutate({
+      type: "member.removed", contextId, actorId: target, key, replayFirst: true,
+      check: () => {
+        if (!this.contextRow(contextId)) throw new Error(`not-a-member: ${target} not in ${contextId}`);
+        if (by === target) { if (!this.memberCaps(contextId, by)) throw new Error(`not-a-member: ${by} not in ${contextId}`); }
+        else this.mustMember(contextId, by, "decide");
+        if (!this.memberCaps(contextId, target)) throw new Error(`not-a-member: ${target} not in ${contextId}`);
+        for (const c of affected()) {
+          if (!this.caps(c, target)?.includes("decide")) continue;
+          const others = (this.db.prepare(`SELECT actor_id FROM members WHERE context_id=? AND actor_id<>?`).all(c, target) as Array<{ actor_id: Id }>)
+            .filter((m) => this.caps(c, m.actor_id)?.includes("decide"));
+          if (!others.length) throw new Error(`forbidden: ${target} is the last holder of decide in ${c}`);
+        }
+      },
+      write: () => {
+        const reopened: Array<{ context: Id; work: Id }> = [];
+        const ctxs = affected();
+        for (const c of ctxs) {
+          for (const w of this.db.prepare(`SELECT id FROM work WHERE context_id=? AND status='claimed' AND claimed_by=?`).all(c, target) as Array<{ id: Id }>) {
+            this.db.prepare(`UPDATE work SET status='open', claimed_by=NULL, lease_until=NULL, updated_at=? WHERE context_id=? AND id=?`).run(Date.now(), c, w.id);
+            reopened.push({ context: c, work: w.id });
+          }
+          this.db.prepare(`DELETE FROM members WHERE context_id=? AND actor_id=?`).run(c, target);
+          this.db.prepare(`DELETE FROM cursors WHERE context_id=? AND actor_id=?`).run(c, target);
+          if (c !== contextId) {
+            this.db.prepare(`INSERT INTO events(ts,type,context_id,actor_id,key,data) VALUES(?,?,?,?,?,?)`).run(
+              Date.now(), "member.removed", c, target, `${key}`, JSON.stringify({ by, reason: "realm-removed", realm: contextId, reopenedWork: reopened.filter((r) => r.context === c).map((r) => r.work) }),
+            );
+          }
+        }
+        return { by, reason: by === target ? "left" : "removed", reopenedWork: reopened.filter((r) => r.context === contextId).map((r) => r.work) };
+      },
+    });
+  }
+
+  /** How many times an actor has been removed from a context. Part of join's default key, so a rejoin after a removal is a new join, not a replay of the old one. */
+  removals(contextId: Id, actorId: Id): number {
+    return (this.db.prepare(`SELECT COUNT(*) n FROM events WHERE context_id=? AND type='member.removed' AND actor_id=?`).get(contextId, actorId) as { n: number }).n;
+  }
+
   postMessage(contextId: Id, actorId: Id, key: string, text: string): PiopleEvent {
     return this.mutate({
       type: "message.posted", contextId, actorId, key,

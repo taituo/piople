@@ -42,6 +42,7 @@ export type Membership = {
 export const EVENT_TYPES = [
   "context.created",
   "member.joined",
+  "member.removed",
   "message.posted",
   "observation.recorded",
   "assistance.requested",

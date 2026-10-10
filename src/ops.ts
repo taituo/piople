@@ -64,7 +64,17 @@ export const OPS: Record<string, Op> = {
   join: {
     description: "Grant membership to another actor (caller needs decide, cannot grant more than it holds)",
     required: ["context", "actor"], optional: ["caps", "key"],
-    run: (s, as, a) => s.join({ contextId: str(a, "context"), actorId: str(a, "actor"), capabilities: a.caps == null ? ["read", "write"] : list(a.caps), joinedAt: Date.now() }, a.key == null ? `join:${str(a, "actor")}:${[...(a.caps == null ? ["read", "write"] : list(a.caps))].sort().join("+")}` : str(a, "key"), as),
+    run: (s, as, a) => s.join({ contextId: str(a, "context"), actorId: str(a, "actor"), capabilities: a.caps == null ? ["read", "write"] : list(a.caps), joinedAt: Date.now() }, a.key == null ? `join:${str(a, "actor")}:${[...(a.caps == null ? ["read", "write"] : list(a.caps))].sort().join("+")}:${s.removals(str(a, "context"), str(a, "actor"))}` : str(a, "key"), as),
+  },
+  leave: {
+    description: "Leave a context or realm (leaving a realm leaves everything inside it). Refused for the last holder of decide",
+    required: ["context"], optional: ["key"],
+    run: (s, as, a) => s.removeMember(str(a, "context"), as, key(a), as),
+  },
+  "remove-member": {
+    description: "Remove another actor from a context or realm at once (caller needs decide). Their held work is reopened; refused for the last holder of decide",
+    required: ["context", "actor"], optional: ["key"],
+    run: (s, as, a) => s.removeMember(str(a, "context"), str(a, "actor"), key(a), as),
   },
   events: {
     description: "Read context events after seq (members only)",
@@ -194,7 +204,7 @@ export const OPS: Record<string, Op> = {
  * client) must fix a key before the first attempt, or a lost response would turn into a duplicate.
  * Other keyed ops (decide, join, ...) have deterministic defaults and are replay-safe as they are.
  */
-export const RANDOM_KEY_OPS: ReadonlySet<string> = new Set(["post", "ask", "answer", "presence", "submit"]);
+export const RANDOM_KEY_OPS: ReadonlySet<string> = new Set(["post", "ask", "answer", "presence", "submit", "leave", "remove-member"]);
 
 export function runOp(s: Store, as: string, name: string, a: Args): unknown {
   const op = OPS[name];
