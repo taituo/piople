@@ -272,6 +272,7 @@ export class Store {
   /** Where a new context sits, validated. A case under a channel lives in that channel's realm. */
   private placement(c: Context, by: Id): { realm: Id | null; parent: Id | null } {
     if (!CONTEXT_KINDS.includes(c.kind) || c.kind === "ingress") throw new Error(`bad-kind: ${c.kind} (case, channel or realm)`);
+    if (typeof c.id !== "string" || c.id.trim() === "" || c.id.length > 200) throw new Error(`bad-context: an id is 1 to 200 characters and not blank`);
     if (c.id.startsWith(INGRESS_PREFIX)) throw new Error(`bad-context: ids starting with ${INGRESS_PREFIX} are reserved for ingress contexts`);
     let realm = c.realmId ?? null;
     const parent = c.parentId ?? null;
@@ -316,6 +317,7 @@ export class Store {
     return this.mutate({
       type: "member.joined", contextId: m.contextId, actorId: m.actorId, key,
       check: () => {
+        if (!m.capabilities.length) throw new Error(`bad-caps: a membership needs at least one of read, write, decide`);
         this.mustMember(m.contextId, by, "decide");
         const extra = m.capabilities.filter((c) => !this.caps(m.contextId, by)!.includes(c));
         if (extra.length) throw new Error(`forbidden: ${by} cannot grant ${extra.join(",")}`);
@@ -498,6 +500,9 @@ export class Store {
         this.mustMember(contextId, actorId, "decide");
         const pres = this.db.prepare(`SELECT echo FROM presence WHERE actor_id=?`).get(actorId) as { echo: number } | undefined;
         if (pres?.echo) throw new Error(`forbidden: echo delegate may never decide`);
+        const d = this.db.prepare(`SELECT options FROM decisions WHERE id=? AND context_id=?`).get(decisionId, contextId) as { options: string } | undefined;
+        const options = d ? (JSON.parse(d.options) as string[]) : [];
+        if (options.length && !options.includes(answer)) throw new Error(`bad-answer: ${JSON.stringify(answer)} is not one of ${options.join(", ")}`);
       },
       write: () => {
         const info = this.db.prepare(`UPDATE decisions SET status='resolved', decided_by=?, answer=?, resolved_at=? WHERE id=? AND context_id=? AND status='open'`).run(actorId, answer, Date.now(), decisionId, contextId);

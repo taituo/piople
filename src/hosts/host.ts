@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { InboxDetail, InboxSummary, Store } from "../core/index.ts";
-import { OPS, runOp, type Args } from "../ops.ts";
+import { OPS, opDef, runOp, type Args } from "../ops.ts";
 import type { CoreClient, Harness, Step } from "./types.ts";
 
 export class LocalCore implements CoreClient {
@@ -192,7 +192,7 @@ export class Host {
       events: d.events,
       pending: d.pending,
       run: async (op, args = {}) => {
-        const def = OPS[op];
+        const def = opDef(op);
         const a: Args = { ...args };
         n++;
         const stable = `${actor}@${d.context}#${d.cursor}.${n}`;

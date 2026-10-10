@@ -75,6 +75,8 @@ PIO_CORE_URL=http://core:8899 PIO_TOKEN=pio_... node --no-warnings src/mcp/serve
   half-done rows. Concurrent processes on one SQLite file queue on the write
   lock (`busy_timeout`) instead of failing.
 - `events` is append-only (SQLite triggers).
+- A decision is answered with one of its options (`yes,no` unless `--options` says otherwise); anything else is refused
+  (`bad-answer`) and the decision stays open. Actors are `human:<id>` or `agent:<id>`; ids are 1 to 200 characters.
 - Proposals never execute; a decision binds them. Echo delegates (away human)
   may answer but never decide. Invited experts may answer without membership.
 

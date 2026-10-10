@@ -21,7 +21,11 @@ type Op = {
   run(s: Store, as: string, a: Args): unknown;
 };
 
-const str = (a: Args, k: string) => String(a[k]);
+const str = (a: Args, k: string) => {
+  const v = a[k];
+  if (v !== null && typeof v === "object") throw new Error(`bad-arg: ${k} must be text, not ${Array.isArray(v) ? "a list" : "an object"}`); // String({}) would store "[object Object]"
+  return String(v);
+};
 const list = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : v == null || v === "" ? [] : String(v).split(","));
 const json = (v: unknown): unknown => {
   if (typeof v !== "string") return v ?? null;
@@ -227,10 +231,20 @@ export const OPS: Record<string, Op> = {
  */
 export const RANDOM_KEY_OPS: ReadonlySet<string> = new Set(["post", "ask", "answer", "presence", "submit", "leave", "remove-member"]);
 
+/** The definition of an op, or undefined: names like "__proto__" or "constructor" are not ops. */
+export function opDef(name: string): Op | undefined {
+  return Object.hasOwn(OPS, name) ? OPS[name] : undefined;
+}
+
+const ACTOR_ID = /^(human|agent):\S{1,200}$/;
+const ACTOR_ARGS = ["actor", "to", "sender"];
+
 export function runOp(s: Store, as: string, name: string, a: Args): unknown {
-  const op = OPS[name];
+  const op = opDef(name);
   if (!op) throw new Error(`unknown-op: ${name}`);
-  const missing = op.required.filter((k) => a[k] == null || a[k] === "");
+  if (!ACTOR_ID.test(as)) throw new Error(`bad-actor: ${JSON.stringify(as)} is not human:<id> or agent:<id>`);
+  for (const k of ACTOR_ARGS) if (a[k] != null && a[k] !== "" && !ACTOR_ID.test(String(a[k]))) throw new Error(`bad-actor: ${k} ${JSON.stringify(String(a[k]).slice(0, 80))} is not human:<id> or agent:<id>`);
+  const missing = op.required.filter((k) => a[k] == null || a[k] === "" || (typeof a[k] === "string" && a[k].trim() === ""));
   if (missing.length) throw new Error(`missing: ${missing.join(",")}`);
   return op.run(s, as, a);
 }
