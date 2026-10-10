@@ -35,14 +35,13 @@ export const OPS: Record<string, Op> = {
   join: {
     description: "Grant membership to another actor (caller needs decide, cannot grant more than it holds)",
     required: ["context", "actor"], optional: ["caps", "key"],
-    run: (s, as, a) => s.join({ contextId: str(a, "context"), actorId: str(a, "actor"), capabilities: a.caps == null ? ["read", "write"] : list(a.caps), joinedAt: Date.now() }, a.key == null ? `join:${str(a, "actor")}` : str(a, "key"), as),
+    run: (s, as, a) => s.join({ contextId: str(a, "context"), actorId: str(a, "actor"), capabilities: a.caps == null ? ["read", "write"] : list(a.caps), joinedAt: Date.now() }, a.key == null ? `join:${str(a, "actor")}:${[...(a.caps == null ? ["read", "write"] : list(a.caps))].sort().join("+")}` : str(a, "key"), as),
   },
   events: {
     description: "Read context events after seq (members only)",
     required: ["context"], optional: ["after", "limit"],
     run: (s, as, a) => {
-      if (!s.isMember(str(a, "context"), as)) throw new Error(`not-a-member: ${as} not in ${str(a, "context")}`);
-      return s.eventsSince(str(a, "context"), Number(a.after ?? 0), Number(a.limit ?? 200));
+      return s.readEvents(str(a, "context"), as, Number(a.after ?? 0), Number(a.limit ?? 200));
     },
   },
   post: {
@@ -82,8 +81,8 @@ export const OPS: Record<string, Op> = {
   },
   presence: {
     description: "Set own presence: active|away|silent, optional echo",
-    required: ["state"], optional: ["echo"],
-    run: (s, as, a) => s.setPresence(as, str(a, "state") as "active" | "away" | "silent", a.echo === true || a.echo === "true"),
+    required: ["state"], optional: ["echo", "key"],
+    run: (s, as, a) => s.setPresence(as, str(a, "state") as "active" | "away" | "silent", a.echo === true || a.echo === "true", a.key == null ? undefined : str(a, "key")),
   },
 };
 

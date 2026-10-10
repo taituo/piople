@@ -58,3 +58,21 @@ test("mcp: same store, identity from env, refusals are tool errors", async () =>
   const ev = JSON.parse(cli("human:alice", "events", "--context", "c1").out) as Array<{ type: string; actorId: string }>;
   assert.deepEqual(ev.at(-1), { ...ev.at(-1), type: "message.posted", actorId: "agent:scout" });
 });
+
+test("16 concurrent writer processes: no lock errors, no lost or duplicated events", async () => {
+  const db2 = join(mkdtempSync(join(tmpdir(), "piople-")), "c.sqlite");
+  const run = (as: string, ...args: string[]) =>
+    new Promise<{ code: number | null; err: string }>((resolve) => {
+      const p = spawn(process.execPath, ["--no-warnings", "src/cli/main.ts", "--db", db2, "--as", as, ...args], { stdio: ["ignore", "ignore", "pipe"] });
+      let err = "";
+      p.stderr.on("data", (d: Buffer) => (err += d));
+      p.on("close", (code) => resolve({ code, err }));
+    });
+  assert.equal((await run("human:alice", "create", "--id", "c1", "--title", "t")).code, 0);
+  // Half the writers replay an already-used key: they must collapse to one event.
+  const results = await Promise.all(Array.from({ length: 16 }, (_, i) => run("human:alice", "post", "--context", "c1", "--text", `m${i}`, "--key", `k${i % 8}`)));
+  assert.deepEqual(results.filter((r) => r.code !== 0), []);
+  const out = execFileSync(process.execPath, ["--no-warnings", "src/cli/main.ts", "--db", db2, "--as", "human:alice", "events", "--context", "c1"], { encoding: "utf8" });
+  const posted = (JSON.parse(out) as Array<{ type: string }>).filter((e) => e.type === "message.posted");
+  assert.equal(posted.length, 8);
+});
