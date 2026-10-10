@@ -239,11 +239,26 @@ export function opDef(name: string): Op | undefined {
 const ACTOR_ID = /^(human|agent):\S{1,200}$/;
 const ACTOR_ARGS = ["actor", "to", "sender"];
 
+/**
+ * Size limits (characters) per argument, applied to every caller: HTTP alone caps its body, and a 5 MB message or a
+ * 1 MB title posted through the CLI, MCP or a local host would otherwise be stored and later shown to every reader and
+ * classifier. Generous on purpose; free text and JSON payloads may be large, names may not.
+ */
+export const MAX_ARG_CHARS = 1_000_000;
+export const ARG_LIMITS: Record<string, number> = { id: 200, title: 2_000, name: 500, skill: 200, goal: 20_000, question: 20_000, reason: 20_000, key: 500, context: 200, decision: 200, answer: 20_000 };
+
 export function runOp(s: Store, as: string, name: string, a: Args): unknown {
   const op = opDef(name);
   if (!op) throw new Error(`unknown-op: ${name}`);
   if (!ACTOR_ID.test(as)) throw new Error(`bad-actor: ${JSON.stringify(as)} is not human:<id> or agent:<id>`);
   for (const k of ACTOR_ARGS) if (a[k] != null && a[k] !== "" && !ACTOR_ID.test(String(a[k]))) throw new Error(`bad-actor: ${k} ${JSON.stringify(String(a[k]).slice(0, 80))} is not human:<id> or agent:<id>`);
+  for (const k of [...op.required, ...(op.optional ?? [])]) {
+    const v = a[k];
+    if (v == null) continue;
+    const size = typeof v === "string" ? v.length : typeof v === "object" ? JSON.stringify(v).length : 0;
+    const limit = ARG_LIMITS[k] ?? MAX_ARG_CHARS;
+    if (size > limit) throw new Error(`too-large: ${k} is ${size} characters, the limit is ${limit}`);
+  }
   const missing = op.required.filter((k) => a[k] == null || a[k] === "" || (typeof a[k] === "string" && a[k].trim() === ""));
   if (missing.length) throw new Error(`missing: ${missing.join(",")}`);
   return op.run(s, as, a);

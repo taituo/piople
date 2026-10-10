@@ -30,7 +30,7 @@ test("a decision can only be answered with one of its options", async () => {
 test("ids and actors are validated at the door", async () => {
   const { alice, as, store } = world();
   await assert.rejects(alice("create", { id: " ", title: "t" }), /missing|bad-context/);
-  await assert.rejects(alice("create", { id: "x".repeat(201), title: "t" }), /bad-context/);
+  await assert.rejects(alice("create", { id: "x".repeat(201), title: "t" }), /too-large: id|bad-context/);
   await assert.rejects(as("justabob")("actor"), /bad-actor/);
   await assert.rejects(as("")("actor"), /bad-actor/);
   await alice("create", { id: "c1", title: "t" });
@@ -78,5 +78,18 @@ test("reusing an id in another context is a clean conflict, not a database error
   assert.deepEqual(statusFor("id-in-use: that decision id already exists"), { status: 409, code: "conflict" });
   assert.equal(store.getDecision("c1", "d1")!.status, "open", "the original is untouched");
   assert.equal(store.getDecision("c2", "d1"), undefined, "nothing was half-written in the other context");
+  store.close();
+});
+
+test("size limits hold for every caller, not only HTTP: a huge title, id or message is refused with too-large", async () => {
+  const { alice, store } = world();
+  await alice("create", { id: "c1", title: "t" });
+  await assert.rejects(alice("create", { id: "c2", title: "x".repeat(2_001) }), /^Error: too-large: title is 2001 characters, the limit is 2000/);
+  await assert.rejects(alice("post", { context: "c1", text: "y".repeat(1_000_001) }), /too-large: text/);
+  await assert.rejects(alice("work-request", { context: "c1", to: "human:alice", input: { a: "z".repeat(1_100_000) } as never }), /too-large: input/);
+  await alice("post", { context: "c1", text: "y".repeat(1_000_000) }); // generous: the limit itself is allowed
+  await alice("create", { id: "c3", title: "x".repeat(2_000) });
+  const { statusFor } = await import("../src/http/server.ts");
+  assert.deepEqual(statusFor("too-large: text is 5 characters, the limit is 1"), { status: 413, code: "too-large" });
   store.close();
 });
