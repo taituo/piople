@@ -225,7 +225,15 @@ export class Store {
       m.check?.();
       const existing = lookup();
       if (existing) return this.row(existing);
-      const data = m.write?.() ?? {};
+      let data: Record<string, unknown>;
+      try {
+        data = m.write?.() ?? {};
+      } catch (e) {
+        // Reusing an id with a different request must be a clean conflict, not a database error text.
+        const dup = /UNIQUE constraint failed: (\w+)\.(?:\w+, \w+\.)?id\b/.exec(e instanceof Error ? e.message : "");
+        if (dup) throw new Error(`id-in-use: that ${dup[1]!.replace(/s$/, "")} id already exists with different content`);
+        throw e;
+      }
       const info = this.db.prepare(`INSERT INTO events(ts,type,context_id,actor_id,key,data) VALUES(?,?,?,?,?,?)`).run(Date.now(), m.type, m.contextId, m.actorId, m.key, JSON.stringify(data));
       const row = this.db.prepare(`SELECT seq, ts, type, context_id, actor_id, key, data FROM events WHERE seq=?`).get(info.lastInsertRowid) as Row;
       return this.row(row);
@@ -272,6 +280,7 @@ export class Store {
   /** Where a new context sits, validated. A case under a channel lives in that channel's realm. */
   private placement(c: Context, by: Id): { realm: Id | null; parent: Id | null } {
     if (!CONTEXT_KINDS.includes(c.kind) || c.kind === "ingress") throw new Error(`bad-kind: ${c.kind} (case, channel or realm)`);
+    if (typeof c.id !== "string" || c.id.trim() === "" || c.id.length > 200) throw new Error(`bad-context: an id is 1 to 200 characters and not blank`);
     if (c.id.startsWith(INGRESS_PREFIX)) throw new Error(`bad-context: ids starting with ${INGRESS_PREFIX} are reserved for ingress contexts`);
     let realm = c.realmId ?? null;
     const parent = c.parentId ?? null;
@@ -316,6 +325,7 @@ export class Store {
     return this.mutate({
       type: "member.joined", contextId: m.contextId, actorId: m.actorId, key,
       check: () => {
+        if (!m.capabilities.length) throw new Error(`bad-caps: a membership needs at least one of read, write, decide`);
         this.mustMember(m.contextId, by, "decide");
         const extra = m.capabilities.filter((c) => !this.caps(m.contextId, by)!.includes(c));
         if (extra.length) throw new Error(`forbidden: ${by} cannot grant ${extra.join(",")}`);
@@ -502,6 +512,9 @@ export class Store {
         this.mustMember(contextId, actorId, "decide");
         const pres = this.db.prepare(`SELECT echo FROM presence WHERE actor_id=?`).get(actorId) as { echo: number } | undefined;
         if (pres?.echo) throw new Error(`forbidden: echo delegate may never decide`);
+        const d = this.db.prepare(`SELECT options FROM decisions WHERE id=? AND context_id=?`).get(decisionId, contextId) as { options: string } | undefined;
+        const options = d ? (JSON.parse(d.options) as string[]) : [];
+        if (options.length && !options.includes(answer)) throw new Error(`bad-answer: ${JSON.stringify(answer)} is not one of ${options.join(", ")}`);
       },
       write: () => {
         const info = this.db.prepare(`UPDATE decisions SET status='resolved', decided_by=?, answer=?, resolved_at=? WHERE id=? AND context_id=? AND status='open'`).run(actorId, answer, Date.now(), decisionId, contextId);
@@ -839,6 +852,30 @@ export class Store {
   routeTargets(router: Id, sender: Id): Target[] {
     this.mustRouter(router);
     return this.targets(sender);
+  }
+
+  /**
+   * Router only: the last few messages before `before` (an event seq) in contexts the SENDER may read, oldest first,
+   * with their realm so the router can hold back what an external classifier may not see. For replies that mean
+   * nothing alone. Never reaches into a context the sender cannot read, and never into ingress contexts.
+   */
+  /** The realm a context belongs to for visibility rules: a realm belongs to itself (as in `permitted` for targets). */
+  private realmOf(contextId: Id): Id | null {
+    const c = this.contextRow(contextId);
+    return c ? (c.kind === "realm" ? contextId : c.realm_id) : null;
+  }
+
+  routeRecent(router: Id, sender: Id, before: number, limit = 3): Array<{ seq: number; context: Id; realm: Id | null; own: boolean; text: string }> {
+    this.mustRouter(router);
+    const n = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), 10) : 3;
+    const rows = this.db.prepare(`SELECT c.id FROM contexts c JOIN members m ON m.context_id=c.id WHERE m.actor_id=? AND c.kind<>'ingress'`).all(sender) as Array<{ id: string }>;
+    const readable = rows.map((r) => r.id).filter((id) => this.caps(id, sender)?.includes("read"));
+    if (!readable.length) return [];
+    const q = this.db.prepare(`SELECT seq, context_id, actor_id, data FROM events WHERE type='message.posted' AND seq<? AND context_id IN (${readable.map(() => "?").join(",")}) ORDER BY seq DESC LIMIT ?`);
+    const out = (q.all(Math.trunc(before), ...readable, n) as Array<{ seq: number; context_id: string; actor_id: string; data: string }>).map((r) => ({
+      seq: r.seq, context: r.context_id, realm: this.realmOf(r.context_id), own: r.actor_id === sender, text: String((JSON.parse(r.data) as { text?: unknown }).text ?? ""),
+    }));
+    return out.reverse();
   }
 
   /** Router only: record the classifier's assessment (audit and later re-testing). Not a decision. */

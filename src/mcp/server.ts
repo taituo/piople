@@ -76,6 +76,7 @@ async function handle(req: Req) {
 
 // Tool calls run one after another (a call over the network can be slow); everything else is
 // answered at once, so one slow call never makes the server look dead to its client.
+const MAX_LINE = 8_000_000;
 let queue: Promise<void> = Promise.resolve();
 let buf = "";
 process.stdin.on("data", (d: Buffer) => {
@@ -91,8 +92,18 @@ process.stdin.on("data", (d: Buffer) => {
       err(null, -32700, "parse error");
       continue;
     }
-    if (req.method === "tools/call") queue = queue.then(async () => { await handle(req); });
-    else void handle(req);
+    // Valid JSON is not always a request: `null`, a number or a list must not take the server down.
+    if (!req || typeof req !== "object" || Array.isArray(req) || typeof req.method !== "string") {
+      err(null, -32600, "invalid request");
+      continue;
+    }
+    const answer = (e: unknown): void => { err(req.id ?? null, -32603, `internal error: ${e instanceof Error ? e.message : String(e)}`); };
+    if (req.method === "tools/call") queue = queue.then(async () => { await handle(req); }).catch(answer);
+    else void handle(req).catch(answer);
+  }
+  if (buf.length > MAX_LINE) { // one endless line without a newline would otherwise grow without bound
+    buf = "";
+    err(null, -32600, `request line over ${MAX_LINE} bytes`);
   }
 });
 process.stdin.on("end", () => void queue.then(() => store?.close()));

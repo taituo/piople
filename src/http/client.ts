@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { OPS, RANDOM_KEY_OPS, type Args, type CoreClient } from "../ops.ts";
+import { OPS, opDef, RANDOM_KEY_OPS, type Args, type CoreClient } from "../ops.ts";
 
 export class CoreError extends Error {
   status: number;
@@ -44,7 +44,7 @@ export class HttpCore implements CoreClient {
     const token = this.tokens.get(as);
     if (!token) throw new Error(`no-token: this client holds no credential for ${as}`);
     const a: Args = { ...args };
-    const def = OPS[op];
+    const def = opDef(op);
     if (RANDOM_KEY_OPS.has(op) && def?.optional?.includes("key")) a.key ??= randomUUID();
     else if (def?.mintsId) a.id ??= `i-${randomUUID().slice(0, 12)}`;
     const retryable = !(op === "work-claim" && (a.next === true || a.next === "true"));

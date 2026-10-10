@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -145,4 +145,33 @@ test("work: a replaced claimant is refused over the CLI; the replacement finishe
   assert.equal((await run("agent:b", "work-complete", "--context", "c1", "--id", "w1", "--attempt", "2", "--result", '{"ok":true}')).code, 0);
   const pending = JSON.parse((await run("agent:b", "inbox", "--context", "c1")).out) as { pending: { work: { open: unknown[]; mine: unknown[] } } };
   assert.deepEqual(pending.pending.work, { open: [], mine: [] });
+});
+
+test("mcp: valid JSON that is not a request (null, a number, a list, a string) is answered with an error and does not stop the server", async () => {
+  const p = spawn(process.execPath, ["--no-warnings", "src/mcp/server.ts"], { env: { ...process.env, PIO_DATA: db, PIO_ACTOR: "agent:scout" }, stdio: ["pipe", "pipe", "inherit"] });
+  const replies: Array<{ id: number | null; error?: { code: number } ; result?: unknown }> = [];
+  let buf = "";
+  p.stdout.on("data", (d: Buffer) => {
+    buf += d.toString();
+    const lines = buf.split("\n");
+    buf = lines.pop() ?? "";
+    for (const l of lines) if (l.trim()) replies.push(JSON.parse(l));
+  });
+  for (const line of ["null", "42", "[]", '"str"', '{"jsonrpc":"2.0","id":1,"method":7}', '{"jsonrpc":"2.0","id":9,"method":"tools/list"}']) p.stdin.write(line + "\n");
+  p.stdin.end();
+  const code = await new Promise((r) => p.on("close", r));
+  assert.equal(code, 0, "the server survived");
+  assert.deepEqual(replies.filter((r) => r.error).map((r) => r.error!.code), [-32600, -32600, -32600, -32600, -32600]);
+  assert.ok(replies.some((r) => r.id === 9 && r.result), "and still answered the real request");
+});
+
+test("cli: a misspelt option is an error, not silently dropped (a claim must not lose its lease)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "piople-cli-"));
+  const run = (...a: string[]) => spawnSync(process.execPath, ["--no-warnings", "src/cli/main.ts", "--db", join(dir, "c.sqlite"), "--as", "human:alice", ...a], { encoding: "utf8" });
+  assert.equal(run("create", "--id", "c1", "--title", "t").status, 0);
+  assert.equal(run("work-request", "--context", "c1", "--id", "w1", "--to", "human:alice", "--input", "{}").status, 0);
+  const typo = run("work-claim", "--context", "c1", "--id", "w1", "--lease-mz", "100");
+  assert.equal(typo.status, 2);
+  assert.match(typo.stderr, /unknown option --lease-mz for work-claim/);
+  assert.equal(JSON.parse(run("work-claim", "--context", "c1", "--id", "w1", "--lease-ms", "100").stdout).work.attempt, 1, "the right spelling works and the typo claimed nothing");
 });

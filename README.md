@@ -75,6 +75,8 @@ PIO_CORE_URL=http://core:8899 PIO_TOKEN=pio_... node --no-warnings src/mcp/serve
   half-done rows. Concurrent processes on one SQLite file queue on the write
   lock (`busy_timeout`) instead of failing.
 - `events` is append-only (SQLite triggers).
+- A decision is answered with one of its options (`yes,no` unless `--options` says otherwise); anything else is refused
+  (`bad-answer`) and the decision stays open. Actors are `human:<id>` or `agent:<id>`; ids are 1 to 200 characters.
 - Proposals never execute; a decision binds them. Echo delegates (away human)
   may answer but never decide. Invited experts may answer without membership.
 
@@ -201,6 +203,22 @@ node src/eval/main.ts                                  # keyword baseline on eva
 node src/eval/main.ts --dataset my-messages.json --target-precision 0.95 [--json]
 OPENROUTER_API_KEY=... JEV_MODEL=<exact id> node src/eval/main.ts --classifier jev --send-to-external --dataset my-messages.json
 ```
+
+Real labelled data comes from real use: when people post straight into a channel they choose the destination
+themselves, so those posts are labels nobody has to write.
+
+```sh
+node src/eval/export-main.ts --db ./data/p.sqlite --out my-messages.json [--redact] [--since SEQ]
+node src/eval/main.ts --dataset my-messages.json --context 1                 # keyword baseline, with the previous message as context
+OPENROUTER_API_KEY=... JEV_MODEL=<exact id> node src/eval/main.ts --classifier jev --send-to-external --context 1 --needs-human-above 0.3 --dataset my-messages.json
+```
+
+The export leaves out what a router delivered (its choice is not a human label), agent posts, ingress contexts and
+very short texts. The file holds real text: keep it local; `--send-to-external` shows it to a third party. `--redact`
+masks e-mails, URLs and long numbers and does not make text safe to share. `--context K` shows the classifier the K
+messages before each one (replies need them); the live router does the same with `recentLimit` (messages the sender
+may read; an external classifier only gets allowed realms), and `needsHumanAbove` hands messages to people when the
+classifier says a person must decide. `eval/*.results.md` records what these did on invented sets.
 
 A dataset is a small world (contexts, who is a member where) plus labelled messages: `{id, sender, text, expect}`
 where `expect` is the destination a reasonable person would pick among what that sender may address, or `null`

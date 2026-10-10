@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { InboxDetail, InboxSummary, Store } from "../core/index.ts";
-import { OPS, runOp, type Args } from "../ops.ts";
+import { OPS, opDef, runOp, type Args } from "../ops.ts";
 import type { CoreClient, Harness, Step } from "./types.ts";
 
 export class LocalCore implements CoreClient {
@@ -28,6 +28,14 @@ export class Host {
   private running = false;
   private readonly sleepers = new Set<() => void>();
   onError: (e: HostError) => void = () => {};
+  /** An error handler that throws must not take the delivery loop down with it (it would die silently and the actor would go deaf). */
+  private report(e: HostError): void {
+    try {
+      this.onError(e);
+    } catch {
+      /* the handler is the caller's; there is nobody left to tell */
+    }
+  }
   private readonly core: CoreClient;
   private readonly opts: { pollMs?: number; holder?: string; leaseMs?: number };
   /** Names this host process to Core. Give a stable one to a service that restarts, so the restart renews its own lease instead of waiting for it to expire. */
@@ -94,7 +102,7 @@ export class Host {
       } catch (error) {
         e.failures++;
         stepFailed = true;
-        this.onError({ actor, context: s.context, error });
+        this.report({ actor, context: s.context, error });
         continue; // no ack: the same events are delivered again
       }
       const last = detail.events.at(-1)?.seq;
@@ -114,7 +122,7 @@ export class Host {
       } catch (error) {
         e.failures++;
         stepFailed = true;
-        this.onError({ actor, context: "*", error });
+        this.report({ actor, context: "*", error });
       }
     }
     e.recovered = true;
@@ -169,7 +177,7 @@ export class Host {
         didWork = await this.pump(e.actor);
       } catch (error) {
         e.failures++; // the core is unreachable or refused us: back off, then pick up from the cursor
-        this.onError({ actor: e.actor, context: "*", error });
+        this.report({ actor: e.actor, context: "*", error });
       }
       const wait = e.failures > 0 ? Math.min(base * 2 ** e.failures, 30_000) : didWork ? 0 : base;
       if (wait > 0) await this.sleep(wait);
@@ -197,7 +205,7 @@ export class Host {
       events: d.events,
       pending: d.pending,
       run: async (op, args = {}) => {
-        const def = OPS[op];
+        const def = opDef(op);
         const a: Args = { ...args };
         n++;
         const stable = `${actor}@${d.context}#${d.cursor}.${n}`;

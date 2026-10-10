@@ -2,17 +2,21 @@ import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { jevClassifier } from "../harnesses/jev.ts";
 import { keywordClassifier } from "../harnesses/router.ts";
+import { consensusClassifier } from "../harnesses/consensus.ts";
 import { analyze, formatReport, runRoutingEval } from "./routing.ts";
 import type { EvalDataset } from "./routing.ts";
 
 /**
  * node src/eval/main.ts [--dataset eval/routing-synthetic.json] [--classifier keyword|jev]
- *                       [--target-precision 0.95] [--json] [--send-to-external]
+ *                       [--target-precision 0.95] [--json] [--send-to-external] [--consensus]
+ * --context K shows the classifier the K messages before each one (a reply needs them); they are sent to jev too.
+ * --needs-human-above P leaves a message unrouted when jev says a person is needed with probability >= P.
+ * --consensus asks jev twice with the destinations in opposite order and routes only when both agree.
  * jev needs OPENROUTER_API_KEY (or JEV_API_KEY), JEV_MODEL (exact id), optionally JEV_ENDPOINT, and
  * --send-to-external: evaluating shows the dataset's message texts and destination names to an outside service.
  */
 const { values } = parseArgs({
-  options: { dataset: { type: "string" }, classifier: { type: "string" }, "target-precision": { type: "string" }, json: { type: "boolean" }, "send-to-external": { type: "boolean" } },
+  options: { dataset: { type: "string" }, classifier: { type: "string" }, "target-precision": { type: "string" }, json: { type: "boolean" }, "send-to-external": { type: "boolean" }, consensus: { type: "boolean" }, context: { type: "string" }, "needs-human-above": { type: "string" } },
   strict: true,
 });
 const dataset = JSON.parse(readFileSync(values.dataset ?? "eval/routing-synthetic.json", "utf8")) as EvalDataset;
@@ -24,9 +28,10 @@ else if (which === "jev") {
   if (!apiKey || !process.env.JEV_MODEL) die("jev needs OPENROUTER_API_KEY (or JEV_API_KEY) and JEV_MODEL");
   if (!values["send-to-external"]) die("jev is an external service: pass --send-to-external to confirm the dataset may be shown to it");
   classifier = jevClassifier({ apiKey: apiKey!, model: process.env.JEV_MODEL!, endpoint: process.env.JEV_ENDPOINT });
+  if (values.consensus) classifier = consensusClassifier(classifier);
 } else die(`unknown classifier ${which} (keyword or jev)`);
 
-const run = await runRoutingEval(dataset, classifier!);
+const run = await runRoutingEval(dataset, classifier!, { context: values.context === undefined ? undefined : Number(values.context), needsHumanAbove: values["needs-human-above"] === undefined ? undefined : Number(values["needs-human-above"]) });
 const analysis = analyze(run.rows, { targetPrecision: values["target-precision"] === undefined ? undefined : Number(values["target-precision"]) });
 if (values.json) process.stdout.write(JSON.stringify({ run, analysis }, null, 2) + "\n");
 else process.stdout.write(formatReport(run, analysis, dataset.note) + "\n");

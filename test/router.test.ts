@@ -186,3 +186,72 @@ test("a message the classifier keeps rejecting is left unresolved after a few at
 function unresolvedOf(s: Store) {
   return s.eventsSince("ingress:human:bob", 0).filter((e) => e.type === "route.unresolved").map((e) => [e.data.submittedKey, e.data.reason]);
 }
+
+test("recentLimit: a reply is shown the messages the sender could read before it; nothing from places the sender cannot read; an external classifier only gets allowed realms", async () => {
+  const store = world();
+  // earlier chat: in incidents (bob reads it), in people (bob reads it), in finance (bob cannot)
+  store.postMessage("ch-incidents", "human:alice", "k1", "the checkout service is returning 500s");
+  store.postMessage("ch-people", "human:carol", "k2", "who covers the holiday desk?");
+  store.postMessage("ch-finance", "human:dave", "k3", "SECRET finance numbers");
+  store.postMessage("ch-incidents", "human:bob", "k4", "I am looking at the database");
+
+  const run = async (external: boolean, allowRealms: string[]) => {
+    const classifier = Object.assign(spy(keywordClassifier()), { external }); // spy() does not carry the flag over
+    const host = await hostWith(store, new RouterHarness({ classifier, mode: "shadow", minConfidence: 0, ruleVersion: external ? "e" : "i", recentLimit: 5, external: { allowRealms } }));
+    store.submitMessage("human:bob", `reply-${external}-${allowRealms.join("+")}`, "yes, do that");
+    await host.settle();
+    await host.close();
+    return classifier.seen.at(-1)!.recent;
+  };
+  assert.deepEqual(await run(false, []), [
+    { own: false, text: "the checkout service is returning 500s" },
+    { own: false, text: "who covers the holiday desk?" },
+    { own: true, text: "I am looking at the database" },
+  ]);
+  assert.deepEqual(await run(true, ["realm-infra"]), [
+    { own: false, text: "the checkout service is returning 500s" },
+    { own: true, text: "I am looking at the database" },
+  ], "external: only the allowed realm; never finance, which bob cannot read, nor hr, which is not allowed");
+  store.close();
+});
+
+test("route-recent is for routers only", () => {
+  const store = world();
+  assert.throws(() => store.routeRecent("human:bob", "human:bob", 100), /router/i);
+  store.close();
+});
+
+test("route-recent: a message posted in a realm itself belongs to that realm, so an external classifier allowed that realm may see it", () => {
+  const store = world();
+  store.postMessage("realm-infra", "human:alice", "r1", "realm-wide notice");
+  assert.deepEqual(store.routeRecent(R, "human:bob", 1e9, 3).map((r) => [r.context, r.realm]), [["realm-infra", "realm-infra"]]);
+  store.close();
+});
+
+test("a malformed classifier answer never routes: NaN, missing, string or out-of-range confidence, null, wrong types", async () => {
+  const bad: Array<[string, unknown]> = [
+    ["NaN", { choice: "ch-incidents", probabilities: {}, confidence: Number.NaN }],
+    ["missing", { choice: "ch-incidents", probabilities: {} }],
+    ["string", { choice: "ch-incidents", probabilities: {}, confidence: "0.99" }],
+    ["above 1", { choice: "ch-incidents", probabilities: {}, confidence: 2 }],
+    ["negative", { choice: "ch-incidents", probabilities: {}, confidence: -1 }],
+    ["null", null],
+    ["a string", "ch-incidents"],
+    ["choice a number", { choice: 7, probabilities: {}, confidence: 1 }],
+    ["skill a number", { choice: "ch-incidents", probabilities: {}, confidence: 1, skill: 5 }],
+    ["no probabilities", { choice: "ch-incidents", confidence: 1 }],
+  ];
+  for (const [name, answer] of bad) {
+    const store = world();
+    const classifier: Classifier = { name: "fake", version: "1", async classify() { return answer as never; } };
+    const host = await hostWith(store, new RouterHarness({ classifier, mode: "enforce", minConfidence: 0.5, ruleVersion: "r1", maxAttempts: 2 }));
+    host.onError = () => {};
+    store.submitMessage("human:bob", "k1", "production outage");
+    for (let i = 0; i < 4; i++) await host.settle(2).catch(() => {});
+    assert.equal(posted(store, "ch-incidents").length, 0, `${name}: nothing delivered`);
+    const un = ingress(store, "human:bob").filter((e) => e.type === "route.unresolved").map((e) => e.data.reason);
+    assert.deepEqual(un, ["classifier-error"], `${name}: left unresolved after the attempts, not pending for ever`);
+    await host.close();
+    store.close();
+  }
+});

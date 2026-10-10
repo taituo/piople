@@ -95,7 +95,9 @@ const CMD = /^\s*(POST|OBSERVE|ASK|ANSWER|DECIDE|WORK|CLAIM|DONE|FAIL|ZOOM|FIND|
 
 /** Strip model control-token leakage (e.g. <ds_s>) before parsing. */
 export function sanitize(text: string): string {
-  return text.replace(/<[a-zA-Z_|][a-zA-Z0-9_|]*>/g, "");
+  // Only token shapes that models leak: <|im_end|>, <｜end▁of▁sentence｜> (full-width bars), <s>, </s>, <eos>, <bos>,
+  // <unk>, <pad>, <ds_s>. Anything else in angle brackets is the author's text (List<String>, <alice>, <email>).
+  return text.replace(/<\|[^<>\n]{0,60}\|>|<｜[^<>\n]{0,60}｜>|<\/?s>|<(?:eos|bos|unk|pad|ds_s)>/g, "");
 }
 
 export type Command = { cmd: string; rest: string };

@@ -21,7 +21,11 @@ type Op = {
   run(s: Store, as: string, a: Args): unknown;
 };
 
-const str = (a: Args, k: string) => String(a[k]);
+const str = (a: Args, k: string) => {
+  const v = a[k];
+  if (v !== null && typeof v === "object") throw new Error(`bad-arg: ${k} must be text, not ${Array.isArray(v) ? "a list" : "an object"}`); // String({}) would store "[object Object]"
+  return String(v);
+};
 const list = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : v == null || v === "" ? [] : String(v).split(","));
 const json = (v: unknown): unknown => {
   if (typeof v !== "string") return v ?? null;
@@ -158,6 +162,11 @@ export const OPS: Record<string, Op> = {
     required: ["sender"],
     run: (s, as, a) => s.routeTargets(as, str(a, "sender")),
   },
+  "route-recent": {
+    description: "Router only: the last messages before an event in contexts the sender may read (context for replies). Show a classifier only what its realm rules allow",
+    required: ["sender"], optional: ["before", "limit"],
+    run: (s, as, a) => s.routeRecent(as, str(a, "sender"), Number(a.before ?? Number.MAX_SAFE_INTEGER), Number(a.limit ?? 3)),
+  },
   "route-classified": {
     description: "Router only: record the classifier's assessment of a submitted message (JSON). Not a decision",
     required: ["ingress", "submitted", "data"], optional: ["tag"],
@@ -232,10 +241,35 @@ export const OPS: Record<string, Op> = {
  */
 export const RANDOM_KEY_OPS: ReadonlySet<string> = new Set(["post", "ask", "answer", "presence", "submit", "leave", "remove-member"]);
 
+/** The definition of an op, or undefined: names like "__proto__" or "constructor" are not ops. */
+export function opDef(name: string): Op | undefined {
+  return Object.hasOwn(OPS, name) ? OPS[name] : undefined;
+}
+
+const ACTOR_ID = /^(human|agent):\S{1,200}$/;
+const ACTOR_ARGS = ["actor", "to", "sender"];
+
+/**
+ * Size limits (characters) per argument, applied to every caller: HTTP alone caps its body, and a 5 MB message or a
+ * 1 MB title posted through the CLI, MCP or a local host would otherwise be stored and later shown to every reader and
+ * classifier. Generous on purpose; free text and JSON payloads may be large, names may not.
+ */
+export const MAX_ARG_CHARS = 1_000_000;
+export const ARG_LIMITS: Record<string, number> = { id: 200, title: 2_000, name: 500, skill: 200, goal: 20_000, question: 20_000, reason: 20_000, key: 500, context: 200, decision: 200, answer: 20_000 };
+
 export function runOp(s: Store, as: string, name: string, a: Args): unknown {
-  const op = OPS[name];
+  const op = opDef(name);
   if (!op) throw new Error(`unknown-op: ${name}`);
-  const missing = op.required.filter((k) => a[k] == null || a[k] === "");
+  if (!ACTOR_ID.test(as)) throw new Error(`bad-actor: ${JSON.stringify(as)} is not human:<id> or agent:<id>`);
+  for (const k of ACTOR_ARGS) if (a[k] != null && a[k] !== "" && !ACTOR_ID.test(String(a[k]))) throw new Error(`bad-actor: ${k} ${JSON.stringify(String(a[k]).slice(0, 80))} is not human:<id> or agent:<id>`);
+  for (const k of [...op.required, ...(op.optional ?? [])]) {
+    const v = a[k];
+    if (v == null) continue;
+    const size = typeof v === "string" ? v.length : typeof v === "object" ? JSON.stringify(v).length : 0;
+    const limit = ARG_LIMITS[k] ?? MAX_ARG_CHARS;
+    if (size > limit) throw new Error(`too-large: ${k} is ${size} characters, the limit is ${limit}`);
+  }
+  const missing = op.required.filter((k) => a[k] == null || a[k] === "" || (typeof a[k] === "string" && a[k].trim() === ""));
   if (missing.length) throw new Error(`missing: ${missing.join(",")}`);
   return op.run(s, as, a);
 }

@@ -222,3 +222,21 @@ test("Jev failures are classified: a rejected message is given up on, a bad key 
   await jev.close();
   store.close();
 });
+
+test("jev: earlier messages go out as {own, text} only, with a reply hint; without them nothing extra is sent", async () => {
+  const bodies: any[] = [];
+  const fake: typeof fetch = async (_url, init) => {
+    bodies.push(JSON.parse(String((init as RequestInit).body)));
+    return new Response(JSON.stringify({ answers: { target: { type: "choice", choice: "a", probabilities: { a: 0.9, [NONE]: 0.1 }, confidence: 0.9 }, needs_human: { type: "noul", noul: 0.1 } } }), { status: 200 });
+  };
+  const c = jevClassifier({ apiKey: "k", model: "m-1", fetch: fake });
+  const targets = [{ id: "a", kind: "channel", title: "A", realm: null, parent: null }];
+  await c.classify({ text: "yes, do that", sender: "human:secret-name", hops: 0, targets, stage: "targets", recent: [{ own: false, text: "shall I roll back?" }, { own: true, text: "maybe" }] });
+  await c.classify({ text: "plain", sender: "human:secret-name", hops: 0, targets, stage: "targets" });
+  assert.deepEqual(bodies[0].state.recent_messages, [{ own: false, text: "shall I roll back?" }, { own: true, text: "maybe" }]);
+  assert.match(bodies[0].questions.target.instructions, /recent_messages/);
+  assert.doesNotMatch(JSON.stringify(bodies[0]), /secret-name/);
+  assert.equal(bodies[1].state.recent_messages, undefined);
+  assert.doesNotMatch(bodies[1].questions.target.instructions, /recent_messages/);
+  assert.match(bodies[1].questions.target.instructions, /choose that channel and not the realm/);
+});

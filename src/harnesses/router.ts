@@ -15,6 +15,8 @@ export type ClassifyInput = {
   /** Only what the sender may address. Realm descriptors when `stage` is "realm". */
   targets: ReadonlyArray<{ id: string; kind: string; title: string; realm: string | null; parent: string | null }>;
   stage: "targets" | "realm";
+  /** The last few messages of the conversation before this one, oldest first, without who wrote them: only whether the sender did (`own`). For replies that mean nothing alone. */
+  recent?: ReadonlyArray<{ own: boolean; text: string }>;
 };
 export type Classification = {
   /** One of the offered ids, or null when nothing fits. */
@@ -75,6 +77,17 @@ export type RouterOptions = {
   needsHumanAbove?: number;
   /** Attempts before a message the classifier keeps rejecting is left unresolved. Default 3. */
   maxAttempts?: number;
+  /**
+   * The messages that came before this one in the conversation (oldest first), for replies like "yes, do that".
+   * Give only what the sender may read: it is shown to the classifier, and to an external one it leaves the system.
+   */
+  recent?: (m: { sender: string; key: string }) => ReadonlyArray<{ own: boolean; text: string }>;
+  /**
+   * Live source for the same thing: take this many messages that came before each one, from the contexts its sender
+   * may read (`route-recent`). An external classifier is shown only those inside `external.allowRealms`. Unset = none.
+   * Ignored when `recent` is given.
+   */
+  recentLimit?: number;
 };
 
 const clamp01 = (n: number) => n >= 0 && n <= 1;
@@ -84,7 +97,7 @@ const top = (p: Record<string, number>, n = 10) => Object.fromEntries(Object.ent
 type Stage = { stage: string; offered: number; choice: string | null; confidence: number };
 
 export class RouterHarness implements Harness {
-  private readonly o: Required<Omit<RouterOptions, "external" | "needsHumanAbove">> & Pick<RouterOptions, "external" | "needsHumanAbove">;
+  private readonly o: Required<Omit<RouterOptions, "external" | "needsHumanAbove" | "recent" | "recentLimit">> & Pick<RouterOptions, "external" | "needsHumanAbove" | "recent" | "recentLimit">;
   private readonly attempts = new Map<string, number>();
   constructor(o: RouterOptions) {
     if (!clamp01(o.minConfidence)) throw new Error("minConfidence must be between 0 and 1");
@@ -169,10 +182,27 @@ export class RouterHarness implements Harness {
     return { choice: r.choice ?? null, probabilities: {}, confidence: r.confidence ?? 0, skill: r.skill ?? null, extras: r.extras ?? undefined };
   }
 
+  /** Earlier messages for a reply: from the callback, or live from what the sender may read (held back for an external classifier outside its allowed realms). */
+  private async recentFor(api: PollApi, sub: Submission): Promise<ReadonlyArray<{ own: boolean; text: string }> | undefined> {
+    if (this.o.recent) return this.o.recent({ sender: sub.sender, key: sub.key });
+    if (!this.o.recentLimit) return undefined;
+    const rows = await api.run<Array<{ realm: string | null; own: boolean; text: string }>>("route-recent", { sender: sub.sender, before: sub.seq, limit: this.o.recentLimit });
+    const allow = new Set(this.o.external?.allowRealms ?? []);
+    return rows.filter((r) => !this.o.classifier.external || (r.realm !== null && allow.has(r.realm))).map((r) => ({ own: r.own, text: r.text }));
+  }
+
   private async classify(api: PollApi, sub: Submission, targets: Target[], ref: { ingress: string; submitted: string }): Promise<Classification> {
     const stages: Stage[] = [];
+    const recent = await this.recentFor(api, sub);
     const ask = async (stage: ClassifyInput["stage"], offered: ClassifyInput["targets"]) => {
-      const c = await this.o.classifier.classify({ submission: `${sub.ingress}#${sub.key}`, text: sub.text, sender: sub.sender, hops: sub.hops, targets: offered, stage });
+      const c = await this.o.classifier.classify({ submission: `${sub.ingress}#${sub.key}`, text: sub.text, sender: sub.sender, hops: sub.hops, targets: offered, stage, ...(recent ? { recent } : {}) });
+      // The classifier is not trusted: `NaN < minConfidence` and `"0.99" < minConfidence` are false, so a malformed
+      // confidence would walk straight past the gate. A bad answer is a failure of this message, never a route.
+      if (!c || typeof c !== "object") throw new ClassifierError("message", "Invalid classification: not an object");
+      if (typeof c.confidence !== "number" || !Number.isFinite(c.confidence) || c.confidence < 0 || c.confidence > 1) throw new ClassifierError("message", "Invalid classification: confidence is not a number between 0 and 1");
+      if (c.choice !== null && typeof c.choice !== "string") throw new ClassifierError("message", "Invalid classification: choice is neither an id nor null");
+      if (c.skill != null && typeof c.skill !== "string") throw new ClassifierError("message", "Invalid classification: skill is not text");
+      if (!c.probabilities || typeof c.probabilities !== "object") throw new ClassifierError("message", "Invalid classification: probabilities missing");
       stages.push({ stage, offered: offered.length, choice: c.choice, confidence: c.confidence });
       return c;
     };

@@ -1,6 +1,6 @@
 import { parseArgs } from "node:util";
 import { Store } from "../core/index.ts";
-import { OPS, runOp } from "../ops.ts";
+import { OPS, opDef, runOp } from "../ops.ts";
 
 /**
  * Process-level CLI. One invocation = one operation, JSON on stdout.
@@ -11,7 +11,7 @@ const argv = process.argv.slice(2);
 const opIdx = argv.findIndex((x, i) => !x.startsWith("--") && (i === 0 || !["--db", "--as"].includes(argv[i - 1]!)));
 const op = opIdx < 0 ? undefined : argv[opIdx];
 
-if (!op || op === "help" || !(op in OPS)) {
+if (!op || op === "help" || !opDef(op)) {
   const lines = Object.entries(OPS).map(([n, o]) =>
     `  ${n.padEnd(17)} ${[...o.required.map((k) => `--${k} <v>`), ...(o.optional ?? []).map((k) => `[--${k} <v>]`)].join(" ")}\n  ${"".padEnd(17)} ${o.description}`);
   process.stderr.write(`usage: piople [--db path] [--as actor] <op> [--arg value ...]\n\n${lines.join("\n")}\n`);
@@ -27,6 +27,15 @@ for (let i = opIdx + 1; i < argv.length; i += 2) {
     process.exit(2);
   }
   opArgs[k.slice(2)] = v;
+}
+// A misspelt option (`--lease-mz`) must not be dropped silently: the call would run without what was meant. (Over HTTP
+// and MCP extra arguments are ignored on purpose, e.g. attempts to name another actor; here a person types the flags.)
+const def = opDef(op)!;
+const known = new Set([...def.required, ...(def.optional ?? [])]);
+const unknown = Object.keys(opArgs).filter((k) => !known.has(k));
+if (unknown.length) {
+  process.stderr.write(`error: unknown option ${unknown.map((k) => `--${k}`).join(", ")} for ${op} (known: ${[...known].map((k) => `--${k}`).join(" ")})\n`);
+  process.exit(2);
 }
 const as = head.values.as ?? process.env.PIO_ACTOR;
 if (!as) {
