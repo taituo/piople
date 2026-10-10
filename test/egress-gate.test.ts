@@ -37,3 +37,13 @@ test("the entry exits 0 when blocked, 1 when still open, 2 on bad usage", async 
   assert.equal(run("127.0.0.1", String(closed), "3000", "2").status, 0);
   assert.equal(run().status, 2);
 });
+
+test("a name that does not resolve, or a bad port, is not evidence that egress is blocked: the gate stays shut", async () => {
+  assert.equal(await blocked("no-such-host.invalid", 80, 1000), false);
+  assert.equal(await blocked("127.0.0.1", 70_000, 300), false);
+  assert.equal(await blocked("127.0.0.1", Number.NaN, 300), false);
+  assert.equal(await waitUntilBlocked("no-such-host.invalid", 80, { deadlineMs: 1500, need: 2, gapMs: 50 }), false, "a typo in the canary must never open the gate");
+  const r = spawnSync(process.execPath, ["--no-warnings", "src/hosts/egress-gate.ts", "no-such-host.invalid", "80", "1500", "2"], { encoding: "utf8" });
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /still open: refusing to start/);
+});
