@@ -56,3 +56,14 @@ test("export: an author whose realm role was lowered no longer has a usable labe
   await runRoutingEval(d, keywordClassifier()); // must not throw dataset-invalid / not-in-realm
   s.close();
 });
+
+test("redactText stays fast on long inputs without an address, and still masks real ones", () => {
+  const t0 = Date.now();
+  redactText("a".repeat(300_000));
+  redactText("a.".repeat(150_000));
+  redactText("1".repeat(300_000));
+  redactText(`https://${"x".repeat(300_000)}`);
+  assert.ok(Date.now() - t0 < 2_000, `linear: took ${Date.now() - t0} ms (it took 7 s for 80,000 characters when quadratic)`);
+  assert.equal(redactText("mail a.b+c@example.co.uk and x@y.fi"), "mail <email> and <email>");
+  assert.equal(redactText("no address here, and a lone @ sign: @"), "no address here, and a lone @ sign: @");
+});

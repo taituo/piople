@@ -15,7 +15,9 @@ import type { EvalDataset } from "./routing.ts";
 export type ExportOptions = { minLength?: number; redact?: boolean; since?: number; name?: string };
 
 export function redactText(t: string): string {
-  return t.replace(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g, "<email>").replace(/https?:\/\/\S+/g, "<url>").replace(/\d{6,}/g, "<number>");
+  // Bounded parts (an address has at most 64 characters before the @ and 63 per label): an unbounded `[\w.+-]+@` is tried
+  // from every start of a long word and made the redaction quadratic (80,000 characters took 7 s, a 1 MB message would hang it).
+  return t.replace(/[\w.+-]{1,64}@[\w-]{1,63}(\.[\w-]{1,63}){1,10}/g, "<email>").replace(/https?:\/\/\S+/g, "<url>").replace(/\d{6,}/g, "<number>");
 }
 
 export function exportLabelled(store: Store, o: ExportOptions = {}): EvalDataset {
