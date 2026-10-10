@@ -37,12 +37,12 @@ export class Host {
     }
   }
   private readonly core: CoreClient;
-  private readonly opts: { pollMs?: number; holder?: string; leaseMs?: number };
+  private readonly opts: { pollMs?: number; holder?: string; leaseMs?: number; stopTimeoutMs?: number };
   /** Names this host process to Core. Give a stable one to a service that restarts, so the restart renews its own lease instead of waiting for it to expire. */
   readonly holder: string;
   private readonly leaseMs: number;
 
-  constructor(core: CoreClient, opts: { pollMs?: number; holder?: string; leaseMs?: number } = {}) {
+  constructor(core: CoreClient, opts: { pollMs?: number; holder?: string; leaseMs?: number; stopTimeoutMs?: number } = {}) {
     this.core = core;
     this.opts = opts;
     this.holder = opts.holder ?? `host-${randomUUID().slice(0, 8)}`;
@@ -157,8 +157,17 @@ export class Host {
   async stop(): Promise<void> {
     this.running = false;
     for (const wake of [...this.sleepers]) wake();
-    await Promise.all(this.loops);
+    // A step in flight is waited for, but not for ever: a harness stuck in a model call that never answers would otherwise
+    // keep stop() (and so close(), which releases the lease) from returning, and a SIGTERM handler would hang until it is killed.
+    const limit = this.opts.stopTimeoutMs ?? 15_000;
+    let timer: NodeJS.Timeout | undefined;
+    const stuck = await Promise.race([
+      Promise.all(this.loops).then(() => false),
+      new Promise<boolean>((r) => { timer = setTimeout(() => r(true), limit); }),
+    ]);
+    clearTimeout(timer);
     this.loops = [];
+    if (stuck) this.report({ actor: "*", context: "*", error: new Error(`stop-timeout: a harness step did not finish within ${limit} ms; stopping without it`) });
   }
 
   async close(): Promise<void> {

@@ -195,3 +195,25 @@ test("a throwing onError handler does not stop delivery: the loop keeps retrying
   assert.deepEqual(seen, [], "no unhandled rejection");
   store.close();
 });
+
+test("stop() does not wait for ever for a harness stuck in a step; a step that is merely slow is still waited for", async () => {
+  const store = new Store(":memory:");
+  const core = new LocalCore(store);
+  const call = (a: string, op: string, x: Record<string, unknown> = {}) => core.call(a, op, x) as Promise<any>;
+  await call("human:alice", "create", { id: "c1", title: "t" });
+  await call("human:alice", "join", { context: "c1", actor: "agent:x", caps: "read,write" });
+  let entered = false;
+  const errors: string[] = [];
+  const host = new Host(core, { pollMs: 5, stopTimeoutMs: 150 });
+  host.onError = (e) => errors.push(String((e.error as Error).message));
+  await host.add({ actor: "agent:x", harness: { step: () => { entered = true; return new Promise(() => {}); } } as never });
+  host.start();
+  await call("human:alice", "post", { context: "c1", text: "go" });
+  for (let i = 0; i < 100 && !entered; i++) await new Promise((r) => setTimeout(r, 5));
+  assert.ok(entered, "the harness is stuck inside its step");
+  const t0 = Date.now();
+  await host.stop();
+  assert.ok(Date.now() - t0 < 1500, `stop() returned after ${Date.now() - t0} ms`);
+  assert.ok(errors.some((m) => /^stop-timeout/.test(m)), "and said which problem it gave up on");
+  store.close();
+});
