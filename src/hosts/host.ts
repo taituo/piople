@@ -220,7 +220,7 @@ export class Host {
         const stable = `${actor}@${d.context}#${d.cursor}.${n}`;
         if (def?.required.includes("context") || def?.optional?.includes("context")) a.context ??= d.context;
         if (def?.optional?.includes("key")) { if (a.key == null) { a.key = stable; a["derived-key"] = true; } } // derived: a retried step may send other content under it
-        else if (def?.mintsId) a.id ??= stable.replace(/[^\w.-]/g, "-");
+        else if (def?.mintsId) a.id ??= stable; // starts with "<actor>@": Core reserves such ids for that actor, so nobody can take them first
         return (await this.call(actor, op, a)) as never;
       },
     };

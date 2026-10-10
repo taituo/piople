@@ -42,3 +42,25 @@ test("an actor may use keys under its own id, also when the id itself contains a
   await call("human:alice", "post", { context: "c1", text: "no prefix", key: "human-ish" });
   store.close();
 });
+
+test("the ids a Host mints (decisions, work, observations, contexts) cannot be taken by someone else first either", async () => {
+  const { store, core, call } = setup();
+  await call("human:alice", "create", { id: "c1", title: "t" });
+  await call("human:alice", "join", { context: "c1", actor: "agent:x", caps: "read,write" });
+  await call("human:alice", "join", { context: "c1", actor: "human:eve", caps: "read,write,decide" });
+  const id = "agent:x@c1#0.1";
+  await assert.rejects(call("human:eve", "decision-request", { context: "c1", id, question: "q", options: "a,b" }), /forbidden/);
+  await assert.rejects(call("human:eve", "work-request", { context: "c1", id, to: "agent:x", input: "{}" }), /forbidden/);
+  await assert.rejects(call("human:eve", "create", { id, title: "taken first" }), /forbidden/);
+  const errors: string[] = [];
+  const host = new Host(core, { pollMs: 5 });
+  host.onError = (e) => errors.push(String((e.error as Error).message));
+  await host.add({ actor: "agent:x", harness: new SyntheticHarness({ behaviors: [async (s) => { if (s.events.some((e) => /ask me/.test(String(e.data.text ?? "")))) await s.run("decision-request", { question: "ship?", options: "yes,no" }); }] }) });
+  await call("human:alice", "post", { context: "c1", text: "ask me" });
+  await host.settle();
+  assert.deepEqual(errors, []);
+  assert.equal(store.eventsSince("c1", 0).filter((e) => e.actorId === "agent:x" && e.type === "decision.requested").length, 1);
+  // normal ids are unaffected
+  await call("human:eve", "decision-request", { context: "c1", id: "d-plain", question: "q", options: "a,b" });
+  store.close();
+});

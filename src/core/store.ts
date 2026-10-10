@@ -252,9 +252,11 @@ export class Store {
     // good (the cursor never moves past a delivery that cannot finish). A key that starts with an actor's id and "@" is that
     // actor's own: the owner is the longest such id among the context's members (and the actor itself), because an id may
     // itself contain an "@" (`agent:a` and `agent:a@b` are two actors).
-    if (/^(?:human|agent):\S+?@/.test(m.key)) {
-      const member = (this.db.prepare(`SELECT actor_id FROM members WHERE context_id=? AND substr(?,1,length(actor_id)+1)=actor_id||'@' ORDER BY length(actor_id) DESC LIMIT 1`).get(m.contextId, m.key) as { actor_id: string } | undefined)?.actor_id;
-      const owner = [member, m.key.startsWith(`${m.actorId}@`) ? m.actorId : undefined].filter((x): x is string => !!x).sort((a, b) => b.length - a.length)[0];
+    // The same holds for the ids a Host mints (`decision:<id>`, `work:<id>`, `create:<id>` keys): look past the type prefix.
+    const probe = m.key.replace(/^(?:create|artifact|decision|proposal|work):(?=(?:human|agent):)/, ""); // only where the caller chooses the id
+    if (/^(?:human|agent):\S+?@/.test(probe)) {
+      const member = (this.db.prepare(`SELECT actor_id FROM members WHERE context_id=? AND substr(?,1,length(actor_id)+1)=actor_id||'@' ORDER BY length(actor_id) DESC LIMIT 1`).get(m.contextId, probe) as { actor_id: string } | undefined)?.actor_id;
+      const owner = [member, probe.startsWith(`${m.actorId}@`) ? m.actorId : undefined].filter((x): x is string => !!x).sort((a, b) => b.length - a.length)[0];
       if (owner !== m.actorId) throw new Error(`forbidden: a key that starts with an actor id and "@" is reserved for that actor; ${m.actorId} may not use ${JSON.stringify(m.key.slice(0, 80))}`);
     }
     return this.tx(() => {
