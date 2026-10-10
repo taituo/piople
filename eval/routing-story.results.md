@@ -47,3 +47,27 @@ Replies (follow-ups) went from 5-6 of 23 to 14 of 23 with context. The channel-f
 - Precision at high thresholds did not improve (context 3, threshold 0.9: 82% on 39 routed, before 90%), so the threshold suggestion is not better yet.
 - The labels were corrected once after seeing results (see above), and the set is invented.
 - `recent` is only supplied by the eval (it treats the dataset as one shared chat). The live router needs a source: the last messages in channels the sender may read. Not built.
+
+---
+
+# Second improvement run: live context source, acknowledgement policy, threshold re-measured
+
+**Built:** `route-recent` (router only): the last N messages before a submission in contexts its sender may read, with their realm; `RouterOptions.recentLimit` uses it; an external classifier gets only messages inside `external.allowRealms` (test: a message from a context the sender cannot read, and one from a realm that is not allowed, never reach the classifier). Before, only the eval could supply context.
+
+**Acknowledgement policy:** a short acknowledgement ("kiitti", "parane pian!", "joo!") may stay unrouted or follow the channel of the thread it answers; either is correct (`accept` on 8 cases, chosen after seeing that context routes them to the thread). This changes the labels again, after seeing results: the numbers below are not comparable with the ones above, only with each other.
+
+| story set (104), new labels, 3 runs | correct | false routes |
+|---|---|---|
+| no context | 67 / 67 / 67 | 19-20 |
+| context 1 | **75 / 75 / 75** | 23-24 |
+
+| minConfidence | no context: routed, right, precision, coverage | context 1: routed, right, precision, coverage |
+|---|---|---|
+| 0.5 | 68, 52, 76%, 65% | 80, 64, 80%, 77% |
+| 0.7 | 54, 45, 83%, 52% | 64, 56, 88%, 62% |
+| 0.8 | 50, 44, 88%, 48% | 54, 49, 91%, 52% |
+| 0.9 | 43, 40, 93%, 41% | 42, 38, 90%, 40% |
+
+Context helps at the useful thresholds: at 0.7 precision 83% to 88% with coverage 52% to 62%; at 0.8 88% to 91% with coverage 48% to 52%. At 0.9 it is no better.
+
+**Threshold suggestion:** with context 1 the lowest threshold reaching 95% is 0.95 (29 routed, 28 right, Wilson lower bound 83%), "not confident". Without context it is 1.0 with 20 routed. So no threshold is safe to enforce on this evidence: 104 invented messages are too few to show a 95% precision with confidence. What is needed is more data, ideally real; more tuning on this set would only fit it.

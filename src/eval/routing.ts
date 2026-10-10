@@ -10,7 +10,7 @@ import type { Classifier } from "../harnesses/router.ts";
  * `minConfidence` comes from measurement. Thresholds are never invented here: with too little data the report
  * says so.
  */
-export type EvalCase = { id: string; sender: string; text: string; /** the destination a reasonable person would pick among what the sender may address, or null when it should stay unrouted */ expect: string | null; tags?: string[] };
+export type EvalCase = { id: string; sender: string; text: string; /** the destination a reasonable person would pick among what the sender may address, or null when it should stay unrouted */ expect: string | null; /** other destinations that are just as acceptable (an acknowledgement may stay unrouted or follow its thread): choosing one counts as correct */ accept?: string[]; tags?: string[] };
 export type EvalDataset = {
   name?: string;
   note?: string;
@@ -77,7 +77,7 @@ export async function runRoutingEval(dataset: EvalDataset, classifier: Classifie
     const base = { id: c.id, sender: c.sender, expect: c.expect, tags: c.tags ?? [], latencyMs };
     if (classified) {
       const d = classified.data as { choice: string | null; confidence: number; extras?: { needsHuman?: number } | null };
-      return { ...base, predicted: d.choice, confidence: d.confidence, needsHuman: d.extras?.needsHuman ?? null, outcome: "classified" as const };
+      return { ...base, expect: d.choice !== null && c.accept?.includes(d.choice) ? d.choice : c.expect, predicted: d.choice, confidence: d.confidence, needsHuman: d.extras?.needsHuman ?? null, outcome: "classified" as const };
     }
     const reason = unresolved?.data.reason;
     const outcome = reason === "no-targets" || reason === "no-permitted-targets" ? reason : "error";
