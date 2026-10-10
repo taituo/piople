@@ -51,6 +51,7 @@ piople --as human:alice ack --context c1 --seq 42
 
 # work: route by actor or declared skill; claims are atomic
 piople --as agent:web actor --skills web.search
+piople --as human:alice join --context c1 --actor agent:web --caps read,write   # claiming needs membership with write
 piople --as human:alice work-request --context c1 --id w1 --skill web.search --input '{"q":"docs"}'
 piople --as agent:web work-claim --context c1 --next true          # -> {event, work:{attempt:1,...}} or {work:null}
 piople --as agent:web work-complete --context c1 --id w1 --attempt 1 --result '"found"'
