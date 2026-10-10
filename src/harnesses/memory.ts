@@ -158,11 +158,12 @@ export class CaseMemory {
   find(context: string, query: string, limit = 8): { matches: MemNode[]; total: number } {
     const words = query.toLowerCase().split(/\s+/).filter((w) => w.length > 0).slice(0, 6);
     if (!words.length) return { matches: [], total: 0 };
-    const like = words.map(() => `LOWER(text) LIKE ? ESCAPE '\\'`).join(" AND ");
-    const args = words.map((w) => `%${w.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
-    const rows = this.db.prepare(`SELECT * FROM nodes WHERE context=? AND level=0 AND ${like} ORDER BY first_seq`).all(context, ...args) as Array<Record<string, unknown>>;
-    const matches = rows.map((r) => this.node(r));
-    return { matches: matches.slice(-limit), total: matches.length };
+    // Matched in JavaScript, not with SQL LIKE/LOWER: SQLite lowers ASCII only, so "älä" would never find "Älä" and
+    // "öljy" never "ÖLJY" (Finnish and Swedish capitals).
+    const rows = this.db.prepare(`SELECT * FROM nodes WHERE context=? AND level=0 ORDER BY first_seq`).all(context) as Array<Record<string, unknown>>;
+    const matches = rows.filter((r) => { const t = String(r.text).toLowerCase(); return words.every((w) => t.includes(w)); }).map((r) => this.node(r));
+    const n = Number.isFinite(limit) ? Math.max(0, Math.trunc(limit)) : 8;
+    return { matches: matches.slice(matches.length - Math.min(n, matches.length)), total: matches.length };
   }
 
   /** Decisions already taken or asked whose events have been folded into summaries: pinned verbatim. */

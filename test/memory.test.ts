@@ -160,3 +160,23 @@ test("find: exact word search over the original lines, newest last, all words re
   assert.ok(!m.find("c1", "items events").matches.length, "summary text is not searched: only the original lines");
   m.close();
 });
+
+test("find: case-insensitive for non-ASCII capitals, wildcards are literal, and a limit of 0 or less returns nothing", () => {
+  const m = CaseMemory.open(":memory:", { summarizer: extractiveSummarizer(), k: 4, recent: 2 });
+  const ev = (seq: number, text: string): MemEvent => ({ seq, actorId: "human:a", type: "message.posted", data: { text } });
+  m.ingest("c", [ev(1, "Päätös: Älä tee rollbackia"), ev(2, "ÖLJY vuotaa, tilaus ÅLAND-1"), ev(3, "100% sure_thing and back\\slash"), ev(4, "plain Upper CASE")]);
+  const ids = (q: string, limit?: number) => m.find("c", q, limit).matches.map((n) => n.id);
+  assert.deepEqual(ids("älä"), ["e1"]);
+  assert.deepEqual(ids("ÄLÄ"), ["e1"]);
+  assert.deepEqual(ids("öljy"), ["e2"]);
+  assert.deepEqual(ids("åland-1"), ["e2"]);
+  assert.deepEqual(ids("upper case"), ["e4"]);
+  assert.deepEqual(ids("100%"), ["e3"]);
+  assert.deepEqual(ids("surexthing"), [], "_ is not a wildcard");
+  assert.deepEqual(ids("back\\slash"), ["e3"]);
+  assert.deepEqual(ids("e", 0), []);
+  assert.deepEqual(ids("e", -1), []);
+  assert.deepEqual(ids("e", 1), ["e4"], "newest match last, the limit keeps the newest");
+  assert.equal(m.find("c", "e", 1).total, 4);
+  m.close();
+});
