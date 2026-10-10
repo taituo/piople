@@ -72,3 +72,18 @@ test("the cursor is durable state: a new connection resumes where the old one st
   assert.deepEqual(resumed.events.map((e) => e.key), ["m2"]);
   s.close();
 });
+
+test("pending asks are found in linear time: 6,000 open asks and some answered ones still take a fraction of a second", () => {
+  const s = new Store(":memory:");
+  s.createContext({ id: "c", kind: "case", title: "t", goal: "", createdAt: 1 }, "human:a");
+  s.join({ contextId: "c", actorId: "human:b", capabilities: ["read", "write"], joinedAt: 2 }, "jb", "human:a");
+  for (let i = 0; i < 6000; i++) s.requestAssistance("c", "human:a", `a${i}`, "human:b", `q${i}?`, {});
+  for (let i = 0; i < 6000; i += 3) s.answerAssistance("c", "human:b", `r${i}`, `a${i}`, "done", []);
+  const t0 = Date.now();
+  const pending = s.pending("c", "human:b").assistance;
+  const took = Date.now() - t0;
+  assert.equal(pending.length, 4000, "the answered third is gone, the rest is still owed");
+  assert.deepEqual(pending.slice(0, 3).map((a) => a.key), ["a1", "a2", "a4"], "in the order they were asked");
+  assert.ok(took < 500, `took ${took} ms (the correlated NOT EXISTS needed about 3 s for 6,000)`);
+  s.close();
+});
