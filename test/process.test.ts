@@ -146,3 +146,21 @@ test("work: a replaced claimant is refused over the CLI; the replacement finishe
   const pending = JSON.parse((await run("agent:b", "inbox", "--context", "c1")).out) as { pending: { work: { open: unknown[]; mine: unknown[] } } };
   assert.deepEqual(pending.pending.work, { open: [], mine: [] });
 });
+
+test("mcp: valid JSON that is not a request (null, a number, a list, a string) is answered with an error and does not stop the server", async () => {
+  const p = spawn(process.execPath, ["--no-warnings", "src/mcp/server.ts"], { env: { ...process.env, PIO_DATA: db, PIO_ACTOR: "agent:scout" }, stdio: ["pipe", "pipe", "inherit"] });
+  const replies: Array<{ id: number | null; error?: { code: number } ; result?: unknown }> = [];
+  let buf = "";
+  p.stdout.on("data", (d: Buffer) => {
+    buf += d.toString();
+    const lines = buf.split("\n");
+    buf = lines.pop() ?? "";
+    for (const l of lines) if (l.trim()) replies.push(JSON.parse(l));
+  });
+  for (const line of ["null", "42", "[]", '"str"', '{"jsonrpc":"2.0","id":1,"method":7}', '{"jsonrpc":"2.0","id":9,"method":"tools/list"}']) p.stdin.write(line + "\n");
+  p.stdin.end();
+  const code = await new Promise((r) => p.on("close", r));
+  assert.equal(code, 0, "the server survived");
+  assert.deepEqual(replies.filter((r) => r.error).map((r) => r.error!.code), [-32600, -32600, -32600, -32600, -32600]);
+  assert.ok(replies.some((r) => r.id === 9 && r.result), "and still answered the real request");
+});
