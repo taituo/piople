@@ -266,7 +266,10 @@ export function opDef(name: string): Op | undefined {
   return Object.hasOwn(OPS, name) ? OPS[name] : undefined;
 }
 
-const ACTOR_ID = /^(human|agent):\S{1,200}$/;
+// Ids are printed in plain text (error messages, terminals): a control character in one (an ESC sequence) would drive the
+// reader's terminal. No id needs one, so none is accepted.
+const ACTOR_ID = /^(human|agent):[^\s\p{Cc}]{1,200}$/u;
+const ID_ARGS = ["context", "id", "decision", "artifact", "request", "key", "ingress", "submitted", "holder", "after-context", "parent", "realm"];
 const ACTOR_ARGS = ["actor", "to", "sender"];
 
 /**
@@ -289,6 +292,7 @@ export function runOp(s: Store, as: string, name: string, a: Args): unknown {
     const limit = ARG_LIMITS[k] ?? MAX_ARG_CHARS;
     if (size > limit) throw new Error(`too-large: ${k} is ${size} characters, the limit is ${limit}`);
   }
+  for (const k of ID_ARGS) if (typeof a[k] === "string" && /\p{Cc}/u.test(a[k] as string)) throw new Error(`bad-arg: ${k} contains a control character`);
   const missing = op.required.filter((k) => a[k] == null || a[k] === "" || (typeof a[k] === "string" && a[k].trim() === ""));
   if (missing.length) throw new Error(`missing: ${missing.join(",")}`);
   // A key the caller chose (CLI --key, HTTP, MCP) names one request: pin the request to it. A key a host derived itself
