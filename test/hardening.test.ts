@@ -123,3 +123,16 @@ test("presence: the state and echo flag are checked; a typo must not silently tu
   assert.deepEqual({ ...row() }, { state: "silent", echo: 0 });
   store.close();
 });
+
+test("yes/no arguments are true or false; a typo is an error, so `retry yes` cannot silently end a work item for good", async () => {
+  const { alice, store } = world();
+  await alice("create", { id: "c1", title: "t" });
+  await alice("work-request", { context: "c1", id: "w1", to: "human:alice", input: "{}" });
+  const claim = await alice("work-claim", { context: "c1", id: "w1" });
+  for (const bad of ["yes", "1", "True", "TRUE", 1]) await assert.rejects(alice("work-fail", { context: "c1", id: "w1", attempt: claim.work.attempt, reason: "x", retry: bad }), /bad-flag/, String(bad));
+  assert.equal(store.getWork("c1", "w1")!.status, "claimed", "the refused calls changed nothing");
+  await alice("work-fail", { context: "c1", id: "w1", attempt: claim.work.attempt, reason: "flaky", retry: "true" });
+  assert.equal(store.getWork("c1", "w1")!.status, "open", "retry true reopens the work");
+  await assert.rejects(alice("work-claim", { context: "c1", next: "yes" }), /bad-flag/);
+  store.close();
+});

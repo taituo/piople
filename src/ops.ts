@@ -35,7 +35,12 @@ const json = (v: unknown): unknown => {
     return v;
   }
 };
-const flag = (v: unknown) => v === true || v === "true";
+/** A yes/no argument: true, false, "true", "false" or absent. Anything else is an error, not "no": `--retry yes` must not silently mean a final failure. */
+const flag = (v: unknown): boolean => {
+  if (v == null || v === false || v === "false") return false;
+  if (v === true || v === "true") return true;
+  throw new Error(`bad-flag: ${JSON.stringify(String(v).slice(0, 40))} is not true or false`);
+};
 const key = (a: Args) => (a.key == null ? randomUUID() : String(a.key));
 
 export const OPS: Record<string, Op> = {
@@ -234,8 +239,9 @@ export const OPS: Record<string, Op> = {
       const state = str(a, "state");
       if (state !== "active" && state !== "away" && state !== "silent") throw new Error(`bad-state: ${JSON.stringify(state.slice(0, 40))} is not active, away or silent`);
       // echo limits what a delegate may do (it never decides): a typo such as "yes" must not silently mean "no echo".
-      if (a.echo != null && a.echo !== true && a.echo !== false && a.echo !== "true" && a.echo !== "false") throw new Error(`bad-echo: ${JSON.stringify(String(a.echo).slice(0, 40))} is not true or false`);
-      return s.setPresence(as, state, a.echo === true || a.echo === "true", a.key == null ? undefined : str(a, "key"));
+      let echo: boolean;
+      try { echo = flag(a.echo); } catch { throw new Error(`bad-echo: ${JSON.stringify(String(a.echo).slice(0, 40))} is not true or false`); }
+      return s.setPresence(as, state, echo, a.key == null ? undefined : str(a, "key"));
     },
   },
 };
