@@ -171,3 +171,27 @@ test("fifty synthetic workers race for twenty jobs on concurrent loops: each don
   assert.ok([...handled.values()].every((n) => n === 1), "no job executed twice");
   store.close();
 });
+
+test("a throwing onError handler does not stop delivery: the loop keeps retrying the failing step", async () => {
+  const store = new Store(":memory:");
+  const core = new LocalCore(store);
+  await core.call("human:alice", "create", { id: "c1", title: "t" });
+  await core.call("human:alice", "join", { context: "c1", actor: "agent:x", caps: "read,write" });
+  let steps = 0;
+  const host = new Host(core, { pollMs: 5 });
+  host.onError = () => { throw new Error("broken handler"); };
+  const seen: unknown[] = [];
+  const onRejection = (e: unknown) => seen.push(e);
+  process.on("unhandledRejection", onRejection);
+  await host.add({ actor: "agent:x", harness: { async step() { steps++; throw new Error("step fails"); } } });
+  host.start();
+  await core.call("human:alice", "post", { context: "c1", text: "hello" });
+  await new Promise((r) => setTimeout(r, 600));
+  const first = steps;
+  await new Promise((r) => setTimeout(r, 600));
+  await host.stop();
+  process.off("unhandledRejection", onRejection);
+  assert.ok(first >= 2 && steps > first, `the step kept being retried (${first} then ${steps})`);
+  assert.deepEqual(seen, [], "no unhandled rejection");
+  store.close();
+});
