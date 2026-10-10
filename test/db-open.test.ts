@@ -64,3 +64,11 @@ test("the HTTP server refuses a bad PIO_PORT with one line, says when the port i
   assert.match(clash.stderr, /^error: cannot listen on 127\.0\.0\.1:\d+: the port is already in use/);
   assert.doesNotMatch(clash.stderr, /node:events|\n\s+at /, "no stack trace");
 });
+
+test("an empty PIO_BIND is refused: it used to bind the API to every network interface", () => {
+  const dir = mkdtempSync(join(tmpdir(), "piople-bind-"));
+  const r = spawnSync(process.execPath, ["--no-warnings", "src/http/main.ts"], { encoding: "utf8", env: { ...process.env, PIO_DATA: join(dir, "p.sqlite"), PIO_PORT: "0", PIO_BIND: "" }, timeout: 15_000 });
+  assert.equal(r.status, 1, `${r.stdout}${r.stderr.slice(0, 100)}`);
+  assert.match(r.stderr, /^error: bad-bind: /);
+  assert.equal(r.stdout, "", "it never started listening");
+});

@@ -11,6 +11,14 @@ try {
 }
 const server = createCoreServer(store);
 const bind = process.env.PIO_BIND ?? "127.0.0.1";
+// An empty host is not "the default": Node binds it to every network interface, so a PIO_BIND that is exported but empty
+// (a compose file with an unset variable) put the API on the whole network while the README says 127.0.0.1. Wider binding
+// has to be asked for by name (0.0.0.0, ::, an address).
+if (bind.trim() === "") {
+  process.stderr.write("error: bad-bind: PIO_BIND is empty; leave it unset for 127.0.0.1, or name the address to listen on (0.0.0.0 for every interface)\n");
+  store.close();
+  process.exit(1);
+}
 // A port is a whole number from 0 (the system picks one, and says which) to 65535. `Number("")` is 0, so an exported but
 // empty PIO_PORT used to mean "some random port nobody knows"; anything else that is not a port ended in a Node stack trace.
 const rawPort = process.env.PIO_PORT ?? "8899";
