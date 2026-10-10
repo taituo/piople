@@ -64,3 +64,21 @@ test("the ids a Host mints (decisions, work, observations, contexts) cannot be t
   await call("human:eve", "decision-request", { context: "c1", id: "d-plain", question: "q", options: "a,b" });
   store.close();
 });
+
+test("a writer cannot take Core's own predictable keys (claim:, complete:, fail:, decision:, …) to block work", async () => {
+  const { store, call } = setup();
+  await call("human:alice", "create", { id: "c1", title: "t" });
+  await call("human:alice", "join", { context: "c1", actor: "agent:w", caps: "read,write" });
+  await call("human:alice", "join", { context: "c1", actor: "human:eve", caps: "read,write" });
+  await call("human:alice", "work-request", { context: "c1", id: "w1", to: "agent:w", input: "{}" });
+  for (const key of ["claim:w1:1", "complete:w1:1", "fail:w1:1", "decision:d9", "work:w2", "create:x", "classified:k", "unresolved:k", "route:i", "presence:p", "promote:a:b", "artifact:a", "proposal:a"]) {
+    await assert.rejects(call("human:eve", "post", { context: "c1", text: "squat", key }), /bad-arg: key .* starts with a prefix Core uses/, key);
+  }
+  const claimed = await call("agent:w", "work-claim", { context: "c1", id: "w1" });
+  assert.equal(claimed.work.id, "w1", "the worker claims it");
+  await call("agent:w", "work-complete", { context: "c1", id: "w1", attempt: claimed.work.attempt, result: "1" });
+  // keys that merely look similar stay free
+  await call("human:eve", "post", { context: "c1", text: "ok", key: "claims:w1" });
+  await call("human:eve", "post", { context: "c1", text: "ok", key: "my-claim:w1:1" });
+  store.close();
+});

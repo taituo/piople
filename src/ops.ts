@@ -286,6 +286,7 @@ export function opDef(name: string): Op | undefined {
 /** Ids are compared as strings: "ä" typed as one character and as a + combining dots look identical on screen but are two ids. */
 export const isNfc = (v: string) => v === v.normalize("NFC");
 const ACTOR_ID = /^(human|agent):[^\s\p{Cc}\p{Cf}\p{Z}]{1,200}$/u;
+const RESERVED_KEY = /^(?:artifact|claim|classified|complete|create|decision|fail|presence|promote|proposal|route|unresolved|work):/;
 const ID_ARGS = ["context", "id", "decision", "artifact", "request", "key", "ingress", "submitted", "holder", "after-context", "parent", "realm"];
 const ACTOR_ARGS = ["actor", "to", "sender"];
 
@@ -312,6 +313,9 @@ export function runOp(s: Store, as: string, name: string, a: Args): unknown {
   }
   for (const k of ID_ARGS) if (typeof a[k] === "string" && /[\p{Cc}\p{Cf}]|(?! )\p{Z}/u.test(a[k] as string)) throw new Error(`bad-arg: ${k} contains a control character (or an invisible or unusual space one)`);
   for (const k of ID_ARGS) if (typeof a[k] === "string" && !isNfc(a[k] as string)) throw new Error(`bad-arg: ${k} is not in Unicode normal form NFC (it would look the same as another id)`);
+  // Core's own keys (`claim:<work>:<attempt>`, `complete:…`, `decision:<id>` …) are predictable from ids every member can see.
+  // A key a caller names itself must not be one of them, or a writer could take `claim:w1:1` first and nobody could ever claim w1.
+  if (typeof a.key === "string" && RESERVED_KEY.test(a.key)) throw new Error(`bad-arg: key ${JSON.stringify(a.key.slice(0, 60))} starts with a prefix Core uses for its own keys`);
   const missing = op.required.filter((k) => a[k] == null || a[k] === "" || (typeof a[k] === "string" && a[k].trim() === ""));
   if (missing.length) throw new Error(`missing: ${missing.join(",")}`);
   // A key the caller chose (CLI --key, HTTP, MCP) names one request: pin the request to it. A key a host derived itself
