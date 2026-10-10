@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -163,4 +163,15 @@ test("mcp: valid JSON that is not a request (null, a number, a list, a string) i
   assert.equal(code, 0, "the server survived");
   assert.deepEqual(replies.filter((r) => r.error).map((r) => r.error!.code), [-32600, -32600, -32600, -32600, -32600]);
   assert.ok(replies.some((r) => r.id === 9 && r.result), "and still answered the real request");
+});
+
+test("cli: a misspelt option is an error, not silently dropped (a claim must not lose its lease)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "piople-cli-"));
+  const run = (...a: string[]) => spawnSync(process.execPath, ["--no-warnings", "src/cli/main.ts", "--db", join(dir, "c.sqlite"), "--as", "human:alice", ...a], { encoding: "utf8" });
+  assert.equal(run("create", "--id", "c1", "--title", "t").status, 0);
+  assert.equal(run("work-request", "--context", "c1", "--id", "w1", "--to", "human:alice", "--input", "{}").status, 0);
+  const typo = run("work-claim", "--context", "c1", "--id", "w1", "--lease-mz", "100");
+  assert.equal(typo.status, 2);
+  assert.match(typo.stderr, /unknown option --lease-mz for work-claim/);
+  assert.equal(JSON.parse(run("work-claim", "--context", "c1", "--id", "w1", "--lease-ms", "100").stdout).work.attempt, 1, "the right spelling works and the typo claimed nothing");
 });
