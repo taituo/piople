@@ -90,7 +90,22 @@ ALTER TABLE contexts ADD COLUMN realm_id TEXT REFERENCES contexts(id);
 ALTER TABLE contexts ADD COLUMN parent_id TEXT REFERENCES contexts(id);
 CREATE INDEX contexts_realm ON contexts(realm_id);
 `,
+  // Migration 10: routers (operator-designated actors that may route submitted messages) and an index by event type.
+  `
+CREATE TABLE routers (actor_id TEXT PRIMARY KEY REFERENCES actors(id), created_at INTEGER NOT NULL);
+CREATE INDEX events_type ON events(type, seq);
+`,
 ];
+
+/** A routed chain of messages may not exceed this many hops (see submitMessage). */
+export const MAX_HOPS = 5;
+/** One actor may have at most this many submitted messages waiting for a route. */
+export const MAX_PENDING_SUBMISSIONS = 100;
+
+/** A message waiting for a route. `classification` is the latest route.classified recorded for it, if any. */
+export type Submission = { ingress: Id; sender: Id; key: string; seq: number; ts: number; text: string; hops: number; classification: Record<string, unknown> | null };
+/** Where a router sends a submission. Always judged with the SENDER's authority, never the router's. */
+export type RouteChoice = { context: Id; as?: "message" | "work"; skill?: string | null; to?: Id | null; deliver?: boolean };
 
 /** Something an actor may address: a context it can write to, with the capabilities it effectively holds there. */
 export type Target = { id: Id; kind: ContextKind; title: string; realm: Id | null; parent: Id | null; capabilities: string[] };
@@ -244,7 +259,7 @@ export class Store {
 
   /** Where a new context sits, validated. A case under a channel lives in that channel's realm. */
   private placement(c: Context, by: Id): { realm: Id | null; parent: Id | null } {
-    if (!CONTEXT_KINDS.includes(c.kind)) throw new Error(`bad-kind: ${c.kind} (case, channel or realm)`);
+    if (!CONTEXT_KINDS.includes(c.kind) || c.kind === "ingress") throw new Error(`bad-kind: ${c.kind} (case, channel or realm)`);
     let realm = c.realmId ?? null;
     const parent = c.parentId ?? null;
     if (c.kind === "realm" && (realm || parent)) throw new Error(`bad-context: a realm has no realm or parent`);
@@ -593,6 +608,158 @@ export class Store {
     }
   }
 
+  // ---- routing: a submitted message waits in its sender's ingress until a router resolves it -----------------------
+
+  addRouter(actorId: Id): void {
+    if (!/^(human|agent):\S+$/.test(actorId)) throw new Error(`bad-actor: ${actorId} (expected human:<name> or agent:<name>)`);
+    this.tx(() => {
+      this.db.prepare(`INSERT INTO actors(id,kind,name) VALUES(?,?,?) ON CONFLICT(id) DO NOTHING`).run(actorId, actorId.startsWith("human:") ? "human" : "agent", actorId);
+      this.db.prepare(`INSERT INTO routers(actor_id,created_at) VALUES(?,?) ON CONFLICT(actor_id) DO NOTHING`).run(actorId, Date.now());
+    });
+  }
+
+  removeRouter(actorId: Id): number {
+    return Number(this.db.prepare(`DELETE FROM routers WHERE actor_id=?`).run(actorId).changes);
+  }
+
+  listRouters(): Id[] {
+    return (this.db.prepare(`SELECT actor_id FROM routers ORDER BY created_at, rowid`).all() as Array<{ actor_id: string }>).map((r) => r.actor_id);
+  }
+
+  private mustRouter(actorId: Id): void {
+    if (!this.db.prepare(`SELECT 1 FROM routers WHERE actor_id=?`).get(actorId)) throw new Error(`forbidden: ${actorId} is not a router`);
+  }
+
+  private ingressOf(actorId: Id): Id {
+    return `ingress:${actorId}`;
+  }
+
+  private terminalOf(ingress: Id, submittedKey: string): string | undefined {
+    return (this.db.prepare(`SELECT type FROM events WHERE context_id=? AND type IN ('route.resolved','route.unresolved') AND json_extract(data,'$.submittedKey')=? LIMIT 1`).get(ingress, submittedKey) as { type: string } | undefined)?.type;
+  }
+
+  private submission(ingress: Id, key: string): { actor_id: string; seq: number; ts: number; data: { text: string; hops: number } } | undefined {
+    const r = this.db.prepare(`SELECT actor_id, seq, ts, data FROM events WHERE context_id=? AND key=? AND type='message.submitted'`).get(ingress, key) as { actor_id: string; seq: number; ts: number; data: string } | undefined;
+    return r ? { ...r, data: JSON.parse(r.data) } : undefined;
+  }
+
+  /**
+   * Submit a message without saying where it belongs. It waits in the sender's own ingress for a router.
+   * `after` names the routed message this one reacts to; the chain's hop count grows by one and is refused
+   * past MAX_HOPS, so automatic participants cannot hand a task back and forth forever. (A participant that
+   * leaves `after` out starts a new chain: the limit protects well-behaved chains, the pending cap below
+   * protects against everything else.)
+   */
+  submitMessage(actorId: Id, key: string, text: string, after?: { context: Id; seq: number }): PiopleEvent {
+    const ingress = this.ingressOf(actorId);
+    let hops = 0;
+    return this.mutate({
+      type: "message.submitted", contextId: ingress, actorId, key, replayFirst: true,
+      check: () => {
+        if (!text.trim()) throw new Error(`bad-message: empty text`);
+        const waiting = (this.db.prepare(`SELECT COUNT(*) n FROM events s WHERE s.context_id=? AND s.type='message.submitted' AND NOT EXISTS (SELECT 1 FROM events r WHERE r.context_id=s.context_id AND r.type IN ('route.resolved','route.unresolved') AND json_extract(r.data,'$.submittedKey')=s.key)`).get(ingress) as { n: number }).n;
+        if (waiting >= MAX_PENDING_SUBMISSIONS) throw new Error(`too-many-pending: ${actorId} has ${waiting} messages waiting for a route`);
+        if (after) {
+          this.mustMember(after.context, actorId, "read");
+          const prev = this.db.prepare(`SELECT data FROM events WHERE context_id=? AND seq=?`).get(after.context, after.seq) as { data: string } | undefined;
+          if (!prev) throw new Error(`bad-after: no event ${after.context}#${after.seq}`);
+          hops = Number((JSON.parse(prev.data) as { hops?: number }).hops ?? 0) + 1;
+          if (hops > MAX_HOPS) throw new Error(`hop-limit: this chain has been routed ${MAX_HOPS} times already`);
+        }
+      },
+      write: () => {
+        this.db.prepare(`INSERT INTO contexts(id,kind,title,goal,created_at) VALUES(?,?,?,?,?) ON CONFLICT(id) DO NOTHING`).run(ingress, "ingress", `Ingress of ${actorId}`, "", Date.now());
+        this.db.prepare(`INSERT INTO members(context_id,actor_id,capabilities,joined_at) VALUES(?,?,?,?) ON CONFLICT(context_id,actor_id) DO NOTHING`).run(ingress, actorId, JSON.stringify(["read", "write"]), Date.now());
+        return { text, hops, after: after ?? null };
+      },
+    });
+  }
+
+  /** Router only: messages still waiting for a route, oldest first, with their latest classification if one was recorded. */
+  routePending(router: Id, limit = 50): Submission[] {
+    this.mustRouter(router);
+    const n = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), MAX_READ) : 50;
+    const rows = this.db.prepare(`SELECT s.context_id, s.actor_id, s.key, s.seq, s.ts, s.data FROM events s WHERE s.type='message.submitted'
+      AND NOT EXISTS (SELECT 1 FROM events r WHERE r.context_id=s.context_id AND r.type IN ('route.resolved','route.unresolved') AND json_extract(r.data,'$.submittedKey')=s.key)
+      ORDER BY s.seq LIMIT ?`).all(n) as Array<{ context_id: string; actor_id: string; key: string; seq: number; ts: number; data: string }>;
+    return rows.map((r) => {
+      const d = JSON.parse(r.data) as { text: string; hops: number };
+      const c = this.db.prepare(`SELECT data FROM events WHERE context_id=? AND type='route.classified' AND json_extract(data,'$.submittedKey')=? ORDER BY seq DESC LIMIT 1`).get(r.context_id, r.key) as { data: string } | undefined;
+      return { ingress: r.context_id, sender: r.actor_id, key: r.key, seq: r.seq, ts: r.ts, text: d.text, hops: d.hops, classification: c ? (JSON.parse(c.data) as Record<string, unknown>) : null };
+    });
+  }
+
+  /** Router only: what the sender may address. The classifier is shown nothing else. */
+  routeTargets(router: Id, sender: Id): Target[] {
+    this.mustRouter(router);
+    return this.targets(sender);
+  }
+
+  /** Router only: record the classifier's assessment (audit and later re-testing). Not a decision. */
+  routeClassified(router: Id, ingress: Id, submittedKey: string, data: Record<string, unknown>, tag?: string): PiopleEvent {
+    return this.mutate({
+      type: "route.classified", contextId: ingress, actorId: router, key: `classified:${submittedKey}${tag ? `:${tag}` : ""}`,
+      check: () => {
+        this.mustRouter(router);
+        if (!this.submission(ingress, submittedKey)) throw new Error(`unknown-submission: ${ingress} ${submittedKey}`);
+        if (this.terminalOf(ingress, submittedKey)) throw new Error(`already-routed: ${submittedKey}`);
+      },
+      write: () => ({ ...data, submittedKey }),
+    });
+  }
+
+  /**
+   * Router only: deliver a submitted message to a context, or with deliver=false only record that the route
+   * would have been valid. Delivery happens AS THE SENDER: the sender must be able to write there, so a router
+   * (or the classifier behind it) can never reach a place the sender cannot. Atomic: a refused route records
+   * nothing and the message stays pending. `as: "work"` requests work (by skill or actor) instead of posting.
+   */
+  routeResolve(router: Id, ingress: Id, submittedKey: string, choice: RouteChoice): PiopleEvent {
+    this.mustRouter(router); // authorization first: replayFirst below must not answer anyone else
+    return this.mutate({
+      type: "route.resolved", contextId: ingress, actorId: router, key: `resolved:${submittedKey}`, replayFirst: true,
+      check: () => {
+        this.mustRouter(router);
+        if (!this.submission(ingress, submittedKey)) throw new Error(`unknown-submission: ${ingress} ${submittedKey}`);
+        if (this.terminalOf(ingress, submittedKey) === "route.unresolved") throw new Error(`already-routed: ${submittedKey} was left unresolved`);
+      },
+      write: () => {
+        const sub = this.submission(ingress, submittedKey)!;
+        const sender = sub.actor_id;
+        const target = choice.context;
+        const as = choice.as ?? "message";
+        if (as !== "message" && as !== "work") throw new Error(`bad-route: as must be message or work`);
+        if (this.contextRow(target)?.kind === "ingress") throw new Error(`bad-route: ${target} is not a destination`);
+        this.mustMember(target, sender, "write"); // the sender's authority decides, not the router's
+        const deliver = choice.deliver !== false;
+        let deliveredSeq: number | null = null;
+        if (deliver) {
+          const via = { via: "route", hops: sub.data.hops, submitted: { ingress, key: submittedKey } };
+          if (as === "work") {
+            deliveredSeq = this.requestWork(target, sender, { id: `route-${ingress}-${submittedKey}`.replace(/[^\w.-]/g, "-"), to: choice.to ?? null, skill: choice.skill ?? null, input: { text: sub.data.text, ...via } }).seq;
+          } else {
+            deliveredSeq = this.mutate({ type: "message.posted", contextId: target, actorId: sender, key: `route:${ingress}:${submittedKey}`, write: () => ({ text: sub.data.text, ...via }) }).seq;
+          }
+        }
+        return { submittedKey, context: target, as, skill: choice.skill ?? null, to: choice.to ?? null, delivered: deliver, deliveredSeq, hops: sub.data.hops };
+      },
+    });
+  }
+
+  /** Router only: the route stayed uncertain or invalid. The message remains in the sender's ingress, visible to the sender. */
+  routeUnresolved(router: Id, ingress: Id, submittedKey: string, reason: string, data: Record<string, unknown> = {}): PiopleEvent {
+    this.mustRouter(router);
+    return this.mutate({
+      type: "route.unresolved", contextId: ingress, actorId: router, key: `unresolved:${submittedKey}`, replayFirst: true,
+      check: () => {
+        this.mustRouter(router);
+        if (!this.submission(ingress, submittedKey)) throw new Error(`unknown-submission: ${ingress} ${submittedKey}`);
+        if (this.terminalOf(ingress, submittedKey) === "route.resolved") throw new Error(`already-routed: ${submittedKey} was resolved`);
+      },
+      write: () => ({ ...data, submittedKey, reason }),
+    });
+  }
+
   /**
    * Move my read cursor forward (never back, never past the end of the log).
    * Acknowledging is not resolving: pending items are derived from open state, not from the cursor.
@@ -653,6 +820,7 @@ export class Store {
     const rows = this.db.prepare(`SELECT c.id, c.kind, c.title, c.realm_id, c.parent_id FROM contexts c JOIN members m ON m.context_id=c.id WHERE m.actor_id=? ORDER BY c.created_at, c.rowid`).all(actorId) as Array<{ id: string; kind: ContextKind; title: string; realm_id: Id | null; parent_id: Id | null }>;
     const out: Target[] = [];
     for (const r of rows) {
+      if (r.kind === "ingress") continue; // a place where messages wait for a route, not a destination
       const caps = this.caps(r.id, actorId);
       if (caps?.includes("write")) out.push({ id: r.id, kind: r.kind, title: r.title, realm: r.realm_id, parent: r.parent_id, capabilities: caps });
     }

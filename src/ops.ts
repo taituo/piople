@@ -112,6 +112,39 @@ export const OPS: Record<string, Op> = {
     required: ["context", "id", "attempt", "reason"], optional: ["retry"],
     run: (s, as, a) => s.failWork(str(a, "context"), as, str(a, "id"), Number(a.attempt), str(a, "reason"), flag(a.retry)),
   },
+  submit: {
+    description: "Submit a message without saying where it belongs; it waits in my ingress until a router routes it. --after-context/--after-seq name the routed message this reacts to (hop limit)",
+    required: ["text"], optional: ["key", "after-context", "after-seq"],
+    run: (s, as, a) => s.submitMessage(as, key(a), str(a, "text"), a["after-context"] == null ? undefined : { context: str(a, "after-context"), seq: Number(a["after-seq"]) }),
+  },
+  "route-pending": {
+    description: "Router only: submitted messages still waiting for a route, with any recorded classification",
+    required: [], optional: ["limit"],
+    run: (s, as, a) => s.routePending(as, Number(a.limit ?? 50)),
+  },
+  "route-targets": {
+    description: "Router only: what the sender may address. Show a classifier nothing else",
+    required: ["sender"],
+    run: (s, as, a) => s.routeTargets(as, str(a, "sender")),
+  },
+  "route-classified": {
+    description: "Router only: record the classifier's assessment of a submitted message (JSON). Not a decision",
+    required: ["ingress", "submitted", "data"], optional: ["tag"],
+    run: (s, as, a) => s.routeClassified(as, str(a, "ingress"), str(a, "submitted"), json(a.data) as Record<string, unknown>, a.tag == null ? undefined : str(a, "tag")),
+  },
+  "route-resolve": {
+    description: "Router only: deliver a submitted message to --context as its sender (message, or --as work with --skill/--to). --deliver false records the route without delivering",
+    required: ["ingress", "submitted", "context"], optional: ["as", "skill", "to", "deliver"],
+    run: (s, as, a) => s.routeResolve(as, str(a, "ingress"), str(a, "submitted"), {
+      context: str(a, "context"), as: a.as == null ? undefined : (str(a, "as") as "message" | "work"),
+      skill: a.skill == null ? null : str(a, "skill"), to: a.to == null ? null : str(a, "to"), deliver: !(a.deliver === false || a.deliver === "false"),
+    }),
+  },
+  "route-unresolved": {
+    description: "Router only: leave a submitted message unrouted (uncertain or invalid); it stays visible to its sender",
+    required: ["ingress", "submitted", "reason"], optional: ["data"],
+    run: (s, as, a) => s.routeUnresolved(as, str(a, "ingress"), str(a, "submitted"), str(a, "reason"), a.data == null ? {} : (json(a.data) as Record<string, unknown>)),
+  },
   post: {
     description: "Post a message",
     required: ["context", "text"], optional: ["key"],
@@ -161,7 +194,7 @@ export const OPS: Record<string, Op> = {
  * client) must fix a key before the first attempt, or a lost response would turn into a duplicate.
  * Other keyed ops (decide, join, ...) have deterministic defaults and are replay-safe as they are.
  */
-export const RANDOM_KEY_OPS: ReadonlySet<string> = new Set(["post", "ask", "answer", "presence"]);
+export const RANDOM_KEY_OPS: ReadonlySet<string> = new Set(["post", "ask", "answer", "presence", "submit"]);
 
 export function runOp(s: Store, as: string, name: string, a: Args): unknown {
   const op = OPS[name];
