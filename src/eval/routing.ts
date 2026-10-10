@@ -29,7 +29,7 @@ export type EvalRun = { dataset: string; classifier: { name: string; version: st
 
 const ORDER: Record<string, number> = { realm: 0, channel: 1, case: 2 };
 
-export async function runRoutingEval(dataset: EvalDataset, classifier: Classifier, opts: { context?: number } = {}): Promise<EvalRun> {
+export async function runRoutingEval(dataset: EvalDataset, classifier: Classifier, opts: { context?: number; needsHumanAbove?: number } = {}): Promise<EvalRun> {
   const store = new Store(":memory:");
   const admin = "human:admin";
   const kind = new Map(dataset.contexts.map((c) => [c.id, c.kind]));
@@ -61,7 +61,7 @@ export async function runRoutingEval(dataset: EvalDataset, classifier: Classifie
   const host = new Host(new LocalCore(store));
   // Running an evaluation is the operator's explicit decision to show the dataset to the classifier.
   const realms = dataset.contexts.filter((c) => c.kind === "realm").map((c) => c.id);
-  await host.add({ actor: "agent:router", harness: new RouterHarness({ classifier: timed, mode: "shadow", minConfidence: 0, ruleVersion: "eval", external: { allowRealms: realms },
+  await host.add({ actor: "agent:router", harness: new RouterHarness({ classifier: timed, mode: "shadow", minConfidence: 0, ruleVersion: "eval", external: { allowRealms: realms }, ...(opts.needsHumanAbove === undefined ? {} : { needsHumanAbove: opts.needsHumanAbove }),
     // The dataset is one shared chat in order: the k messages before this one are what a participant just read.
     ...(opts.context ? { recent: ({ sender, key }) => { const i = dataset.cases.findIndex((c) => c.id === key); return dataset.cases.slice(Math.max(0, i - opts.context!), Math.max(0, i)).map((c) => ({ own: c.sender === sender, text: c.text })); } } : {}) }) });
   host.onError = () => {};
@@ -77,7 +77,10 @@ export async function runRoutingEval(dataset: EvalDataset, classifier: Classifie
     const base = { id: c.id, sender: c.sender, expect: c.expect, tags: c.tags ?? [], latencyMs };
     if (classified) {
       const d = classified.data as { choice: string | null; confidence: number; extras?: { needsHuman?: number } | null };
-      return { ...base, expect: d.choice !== null && c.accept?.includes(d.choice) ? d.choice : c.expect, predicted: d.choice, confidence: d.confidence, needsHuman: d.extras?.needsHuman ?? null, outcome: "classified" as const };
+      // a message held back because the classifier said a person is needed was not routed, whatever it chose
+      const held = unresolved?.data.reason === "needs-human";
+      const choice = held ? null : d.choice;
+      return { ...base, expect: choice !== null && c.accept?.includes(choice) ? choice : c.expect, predicted: choice, confidence: d.confidence, needsHuman: d.extras?.needsHuman ?? null, outcome: "classified" as const };
     }
     const reason = unresolved?.data.reason;
     const outcome = reason === "no-targets" || reason === "no-permitted-targets" ? reason : "error";
