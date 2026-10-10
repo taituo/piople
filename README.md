@@ -479,7 +479,9 @@ Core, Host and the harnesses do not change; a cluster is just another place part
   refused several times in a row before the worker container starts. Measured on k3s (kube-router): a new pod's rules
   land a fraction of a second after its container starts, and one connection in three test runs got out in that
   window; the gate closes it, and it **fails closed** where egress is not restricted at all (tested in a namespace with
-  no policies). Note that an established connection stays open when the policy arrives (and Node's `fetch` reuses
+  no policies). Only connect-level outcomes (refused, unreachable, timeout) count as "blocked": a canary name that does not
+  resolve, or a bad port, leaves the gate shut (found by the second session's bug hunt: a typo used to open it). Give the
+  canary as an **IP address**, in case DNS is itself behind the policy. Note that an established connection stays open when the policy arrives (and Node's `fetch` reuses
   connections), so measure with fresh ones.
 
 ```sh
