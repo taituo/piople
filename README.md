@@ -370,6 +370,17 @@ own child process (`src/harnesses/tools.ts`, tools in `src/tools/`):
   nothing (a `cwd`, and `bash` runs an unrestricted shell); isolation is meant to live in the environment, which is
   what the child process provides. Pi's `beforeTool` hook is the natural place to gate a tool call on a Core decision
   (not built yet).
+- **Approval gate** (`approval: { tools: ["read_file"] }`, both modes): a call to a listed tool opens a Core decision
+  ("allow"/"deny") and is blocked; the model is told to wait. When someone holding `decide` resolves it the agent is
+  shown the resolution and calls again: "allow" lets that exact call (tool and arguments) through, "deny" blocks it and
+  says who denied. Non-blocking and durable (nothing waits inside a task; the decision is an ordinary Core item, so it
+  shows in the inbox, survives restarts and works from `piople watch`, the CLI or Temporal), one decision per distinct
+  call, and the agent cannot approve itself: that needs `decide`, which Core grants separately. This is Pi's
+  `beforeTool` hook used as the point where a human enters the loop.
+- **Tool-call cap** (`maxToolCalls`, default 16 per delivery, native tools): Pi runs a model's tool calls for as long as
+  the model makes them, with no limit of its own, so a model retrying a blocked call would loop at your cost. Over the cap
+  the tool answers with `terminate` (the only thing that ends a Pi run; aborting the conversation does not stop a run that
+  has queued its next request, measured) and the agent says in the case that it stopped.
 - Checked with real models (`scripts/live-tools.ts`, `LIVE_NATIVE=1` for native tools): an agent reads a runbook
   inside its directory and is refused when asked for a file outside; the canary in that file never reached it.
 - **A reply with no command line and no `NOOP` is not silence**: the model is told once ("nothing happened") and may

@@ -208,6 +208,11 @@ export const OPS: Record<string, Op> = {
     required: ["context", "question"], optional: ["options", "id"],
     run: (s, as, a) => s.requestDecision({ id: a.id == null ? `d-${randomUUID().slice(0, 8)}` : str(a, "id"), contextId: str(a, "context"), question: str(a, "question"), options: a.options == null ? ["yes", "no"] : list(a.options), requestedBy: as, decidedBy: null, answer: null, status: "open", createdAt: Date.now(), resolvedAt: null }),
   },
+  "decision-get": {
+    description: "Where one decision stands: open or resolved, who decided and what (members may read)",
+    required: ["context", "id"],
+    run: (s, as, a) => s.decisionInfo(str(a, "context"), as, str(a, "id")),
+  },
   decide: {
     description: "Resolve an open decision (needs decide; echo delegates never decide)",
     required: ["context", "decision", "answer"], optional: ["key"],

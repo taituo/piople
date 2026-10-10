@@ -537,6 +537,14 @@ export class Store {
     return this.db.prepare(`SELECT status, answer FROM decisions WHERE id=? AND context_id=?`).get(decisionId, contextId) as { status: string; answer: string | null } | undefined;
   }
 
+  /** One decision as a member may read it: where it stands, who decided and what. Reading is all it takes. */
+  decisionInfo(contextId: Id, actorId: Id, decisionId: Id): { found: false } | { found: true; id: Id; question: string; options: string[]; status: string; answer: string | null; decidedBy: Id | null; requestedBy: Id } {
+    this.mustMember(contextId, actorId, "read");
+    const r = this.db.prepare(`SELECT id, question, options, status, answer, decided_by, requested_by FROM decisions WHERE id=? AND context_id=?`).get(decisionId, contextId) as
+      { id: string; question: string; options: string; status: string; answer: string | null; decided_by: string | null; requested_by: string } | undefined;
+    return r ? { found: true, id: r.id, question: r.question, options: JSON.parse(r.options) as string[], status: r.status, answer: r.answer, decidedBy: r.decided_by, requestedBy: r.requested_by } : { found: false };
+  }
+
   /**
    * Presence is global per actor and logged in each shared context.
    * With a caller key the call is idempotent: a replayed (older) key never reverts newer state.

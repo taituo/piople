@@ -1,10 +1,11 @@
+import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Type, createModels, createProvider, type Models } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { Harness as PiRuntime, createRegistry, defineExtension, defineTool, type Conversation } from "@earendil-works/pi-durable";
+import { Harness as PiRuntime, createRegistry, defineExtension, defineTool, hook, ToolTask, type Conversation } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { Harness, Step } from "../hosts/types.ts";
 import { CaseMemory, type MemEvent, type Summarizer } from "./memory.ts";
@@ -50,6 +51,20 @@ export type PiHarnessOptions = {
    * confinement is the same: the call still runs through `runTool` in its own restricted child process.
    */
   nativeTools?: boolean;
+  /**
+   * Tools that need a person's approval before they run. The first call opens a Core decision ("allow"/"deny") and is
+   * blocked; the model is told to wait. When someone with `decide` resolves it, the agent is shown the resolution and
+   * calls again: "allow" lets that exact call (tool and arguments) through, "deny" blocks it. Non-blocking and durable:
+   * nothing waits inside a task, the decision is an ordinary Core item, and the agent can never approve itself (it needs
+   * `decide` for that, which Core grants separately).
+   */
+  approval?: { tools: string[] };
+  /**
+   * Native tools only: the most tool calls one delivery may make (default 16). Pi runs a model's tool calls for as long
+   * as the model keeps making them, so a model that retries a blocked call would otherwise loop for ever, at your
+   * cost. Over the limit the run is aborted and the agent says so in the case.
+   */
+  maxToolCalls?: number;
   /** Called with every model reply (and the prompt that produced it) before it is parsed: for audit and debugging. */
   onReply?: (e: { requestId: string; prompt: string; reply: string }) => void;
 };
@@ -94,7 +109,14 @@ export function parseCommands(reply: string): Command[] {
   return out;
 }
 
-const brief = (d: Record<string, unknown>) => String(d.text ?? d.question ?? d.answer ?? JSON.stringify(d)).slice(0, 400);
+const brief = (d: Record<string, unknown>) => `${typeof d.decisionId === "string" ? `[${d.decisionId}] ` : ""}${String(d.text ?? d.question ?? d.answer ?? JSON.stringify(d))}`.slice(0, 400);
+
+/** JSON with sorted keys: the same arguments always give the same text, so the same approval. */
+function canonical(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonical).join(",")}]`;
+  if (v && typeof v === "object") return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical((v as Record<string, unknown>)[k])}`).join(",")}}`;
+  return JSON.stringify(v) ?? "null";
+}
 
 export function renderStep(s: Step, maxEvents = 40): string | null {
   const events = s.events.filter((e) => e.actorId !== s.actor);
@@ -127,6 +149,10 @@ export class PiHarness implements Harness {
   private readonly memory: CaseMemory | undefined;
   /** Compactions that failed (the summariser was down); the memory is left as it was and retried next delivery. */
   memoryErrors = 0;
+  /** The delivery being handled: the gate asks Core in its case, as this actor. */
+  private current: Step | undefined;
+  private toolCalls = 0;
+  limitHit = false;
 
   private constructor(o: PiHarnessOptions, rt: PiRuntime, storage: PiHarness["storage"], map: DatabaseSync, memory: CaseMemory | undefined) {
     this.o = o;
@@ -153,13 +179,17 @@ export class PiHarness implements Harness {
       CREATE TABLE IF NOT EXISTS failed (request_id TEXT PRIMARY KEY, n INTEGER NOT NULL);`);
     const storage = await openNodeSqliteStorage(piPath);
     const registry = createRegistry();
-    if (o.environment && o.nativeTools) registry.install(environmentExtension(o.environment));
+    const gate: GateRef = {};
+    if (o.environment && o.nativeTools) registry.install(environmentExtension(o.environment, gate));
     const rt = await PiRuntime.open(storage, {
       models: createPiModels(o), registry, settings: { retry: { maxRetries: 1 } },
     } as never, BACKGROUND_CONTEXT);
     rt.resume();
     const memory = o.memory ? CaseMemory.open(o.dir === ":memory:" ? ":memory:" : join(o.dir, `${safe}.memory.sqlite`), o.memory) : undefined;
-    return new PiHarness(o, rt, storage as never, map, memory);
+    const h = new PiHarness(o, rt, storage as never, map, memory);
+    gate.check = (name, args) => h.beforeToolCall(name, args);
+    gate.exhausted = () => h.limitHit;
+    return h;
   }
 
   async close(): Promise<void> {
@@ -172,6 +202,17 @@ export class PiHarness implements Harness {
   }
 
   async step(s: Step): Promise<void> {
+    this.current = s;
+    this.toolCalls = 0;
+    this.limitHit = false;
+    try {
+      await this.deliver(s);
+    } finally {
+      this.current = undefined;
+    }
+  }
+
+  private async deliver(s: Step): Promise<void> {
     let prompt = renderStep(s);
     if (prompt === null) {
       await this.remember(s);
@@ -203,6 +244,7 @@ export class PiHarness implements Harness {
       }
       prompt = feedback.length ? `${feedback.join("\n")}\nContinue, or reply NOOP.` : null;
     }
+    if (this.limitHit) await s.run("observe", { text: `I stopped: I made more than ${this.o.maxToolCalls ?? 16} tool calls in one go without finishing. A person should look at what I was asked to do.` }).catch(() => {});
     await this.remember(s);
   }
 
@@ -227,6 +269,31 @@ export class PiHarness implements Harness {
     }
   }
 
+  /**
+   * Every native tool call passes here first: the per-delivery cap, then the approval gate. A reason blocks the call.
+   * Over the cap nothing is blocked: the call goes through to the tool, which answers with `terminate`, the one thing
+   * that ends a Pi run (aborting the conversation does not stop a run that has already queued its next request).
+   */
+  async beforeToolCall(name: string, args: unknown): Promise<string | null> {
+    if (++this.toolCalls > (this.o.maxToolCalls ?? 16)) {
+      this.limitHit = true;
+      return null;
+    }
+    return this.gate(name, args);
+  }
+
+  /** Why a tool call may not run yet (or at all), or null. See `approval`. */
+  async gate(name: string, args: unknown): Promise<string | null> {
+    if (!this.o.approval?.tools.includes(name)) return null;
+    const s = this.current;
+    if (!s) return `${name} needs a person's approval and there is no case to ask in right now`;
+    const id = `tool-${createHash("sha256").update(`${name}\0${canonical(args)}`).digest("hex").slice(0, 20)}`;
+    const d = await s.run<{ found: boolean; status?: string; answer?: string; decidedBy?: string }>("decision-get", { id });
+    if (d.found && d.status === "resolved") return d.answer === "allow" ? null : `${d.decidedBy ?? "a person"} denied this call (decision ${id}): ${name} will not run`;
+    if (!d.found) await s.run("decision-request", { id, question: `Allow ${this.actor} to run ${name} ${canonical(args)}?`, options: "allow,deny" });
+    return `approval needed: decision ${id} is waiting for a person to answer allow or deny. Do not retry yet; you will be told when it is resolved, then call again with the same arguments.`;
+  }
+
   private async tool(rest: string): Promise<string> {
     const env = this.o.environment;
     if (!env) return "REFUSED TOOL: this agent has no tools";
@@ -236,6 +303,8 @@ export class PiHarness implements Harness {
     if (bar >= 0 && rest.slice(bar + 1).trim()) {
       try { args = JSON.parse(rest.slice(bar + 1)); } catch { return `REFUSED TOOL ${name}: the arguments are not valid JSON`; }
     }
+    const blocked = await this.gate(name, args);
+    if (blocked) return `REFUSED TOOL ${name}: ${blocked}`;
     const r = await runTool(env, name, args);
     if (!r.ok) return `REFUSED TOOL ${name}: ${r.error}`;
     return `Tool ${name} returned:\n${r.output.length > 6000 ? `${r.output.slice(0, 6000)}\n…(cut)` : r.output}`;
@@ -355,17 +424,25 @@ const TOOL_SCHEMAS = {
 } as const;
 
 /** The profile's tools as a Pi extension. The work stays in runTool (a confined child process); Pi supplies durability. */
-function environmentExtension(profile: EnvironmentProfile) {
+type GateRef = { check?: (name: string, args: unknown) => Promise<string | null>; exhausted?: () => boolean };
+function environmentExtension(profile: EnvironmentProfile, gate: GateRef) {
   const text = (t: string) => [{ type: "text" as const, text: t }];
   const tools = profile.tools.filter((n): n is keyof typeof TOOL_SCHEMAS => n in TOOL_SCHEMAS && n in TOOLS).map((name) =>
     defineTool({
       name, description: TOOL_SCHEMAS[name].summary, parameters: TOOL_SCHEMAS[name].parameters as never, replay: "safe",
       execute: async (args: unknown) => {
+        if (gate.exhausted?.()) return { isError: true, content: text("tool call limit reached for this delivery: stopping"), control: { terminate: true } };
         const r = await runTool(profile, name, args);
         return r.ok ? { content: text(r.output) } : { isError: true, content: text(`REFUSED ${name}: ${r.error}`) };
       },
     } as never));
-  return defineExtension({ name: "piople-env", tools: tools as never });
+  const guard = hook(ToolTask, {
+    beforeTool: async (call: { name: string; arguments: unknown }) => {
+      const why = await gate.check?.(call.name, call.arguments);
+      return why ? { block: why } : undefined;
+    },
+  } as never);
+  return defineExtension({ name: "piople-env", tools: tools as never, hooks: [guard] as never });
 }
 
 function createPiModels(o: PiHarnessOptions): Models {
