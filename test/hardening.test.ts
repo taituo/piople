@@ -256,3 +256,25 @@ test("ids cannot hide characters: zero-width, direction overrides, soft hyphens 
   await alice("create", { id: "ääkköset 😀 ok", title: "t" }); // visible text, Finnish letters, emoji and an ordinary space stay fine
   store.close();
 });
+
+test("one read of a case is bounded in bytes: a writer cannot make every poll a hundred megabytes, and a reader still gets everything page by page", async () => {
+  const { alice, as, store } = world();
+  await alice("create", { id: "c1", title: "t" });
+  await alice("join", { context: "c1", actor: "agent:x", caps: "read,write" });
+  const big = "y".repeat(999_000);
+  for (let i = 0; i < 12; i++) await alice("post", { context: "c1", text: `${i}:${big}`, key: `k${i}` });
+  const agent = as("agent:x");
+  const seen: string[] = [];
+  for (let page = 0; page < 20; page++) {
+    const inbox = await agent("inbox", { context: "c1" });
+    if (!inbox.events.length) break;
+    const bytes = JSON.stringify(inbox.events).length;
+    assert.ok(bytes < 5_500_000, `a page was ${bytes} bytes`);
+    for (const e of inbox.events) if (e.type === "message.posted") seen.push(String(e.data.text).split(":")[0]!);
+    await agent("ack", { context: "c1", seq: inbox.events.at(-1).seq });
+  }
+  assert.deepEqual(seen, Array.from({ length: 12 }, (_, i) => String(i)), "every message arrived, in order, none twice");
+  const first = await agent("events", { context: "c1", after: 0, limit: 1000 });
+  assert.ok(first.length >= 1 && first.length < 8, `events returned ${first.length} at once`);
+  store.close();
+});

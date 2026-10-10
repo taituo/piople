@@ -164,6 +164,8 @@ type Mutation = {
 
 /** One read never returns more than this many events; page with the cursor. */
 export const MAX_READ = 1000;
+/** The most event data one read returns (the first event always comes, even if it alone is larger). */
+export const MAX_READ_BYTES = 4_000_000;
 /** The longest claim lease: a holder that dies keeps its work this long at most. Without a bound, 1e14 ms (3000 years) made a claim permanent. */
 export const MAX_LEASE_MS = 7 * 24 * 3600 * 1000;
 const checkLease = (leaseMs: number | undefined) => {
@@ -1136,7 +1138,18 @@ export class Store {
   /** Unchecked read, for internal and test use. Actors go through readEvents. */
   eventsSince(contextId: string, afterSeq: number, limit = 200): PiopleEvent[] {
     limit = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), MAX_READ) : 200;
-    const rows = this.db.prepare(`SELECT seq, ts, type, context_id, actor_id, key, data FROM events WHERE context_id=? AND seq>? ORDER BY seq ASC LIMIT ?`).all(contextId, afterSeq, limit) as Row[];
+    // A page is also bounded in bytes: a message may be 1 MB and a page 1000 events, so one writer could make every read of
+    // the case (the Host polls it all the time) a gigabyte. The first event always comes (a reader must make progress),
+    // the rest only while they fit; a reader acks what it got and the next read continues from there.
+    const sizes = this.db.prepare(`SELECT seq, length(data) AS n FROM events WHERE context_id=? AND seq>? ORDER BY seq ASC LIMIT ?`).all(contextId, afterSeq, limit) as Array<{ seq: number; n: number }>;
+    let total = 0, upTo = 0;
+    for (const z of sizes) {
+      if (upTo && total + z.n > MAX_READ_BYTES) break;
+      total += z.n;
+      upTo = z.seq;
+    }
+    if (!upTo) return [];
+    const rows = this.db.prepare(`SELECT seq, ts, type, context_id, actor_id, key, data FROM events WHERE context_id=? AND seq>? AND seq<=? ORDER BY seq ASC`).all(contextId, afterSeq, upTo) as Row[];
     return rows.map((r) => this.row(r));
   }
 
