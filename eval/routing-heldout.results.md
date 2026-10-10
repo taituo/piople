@@ -33,3 +33,6 @@ The eval counted a message as routed when the classifier had chosen something, e
 
 ## Suggested shadow setting, not an enforcement recommendation
 `minConfidence 0.7-0.8`, `needsHumanAbove 0.3`, `recentLimit 1`, Jev pinned to `typesafe/jev-1.13-20260917`, mode `shadow`. Compare with what people really chose for a few weeks before enforcing anything.
+
+## Tried and rejected: realm name in the channel description
+Each channel was described to Jev as `channel: <title> (in realm: <realm title>)`, hoping to separate "design" in the engineering realm from "deployments" in infrastructure. 3 runs per set, against the numbers above: story 76 / 75 / 75 (before 75), held-out 59 / 60 / 60 (before 59), hard 33 / 33 / 33 (before 32-33), injection 21 / 22 / 20 (before 22-23). `ch-design` stayed at 1 of 8 (held-out) and 2 of 7 (story). Differences of one message are noise and the injection set got slightly worse, so the change was reverted. The design/deploys confusion is probably the channel descriptions themselves (a real workspace would describe its channels better than these invented titles), not missing hierarchy.
