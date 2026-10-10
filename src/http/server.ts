@@ -31,25 +31,25 @@ export function statusFor(message: string): { status: number; code: string } {
 export function createCoreServer(store: Store, o: ServerOptions = {}): http.Server {
   const maxBody = o.maxBody ?? 1_000_000;
   const server = http.createServer((req, res) => {
-    const send = (status: number, body: unknown) => {
+    const send = (status: number, body: unknown, allow?: string) => {
       const text = JSON.stringify(body);
-      res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(text), "cache-control": "no-store" });
+      res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(text), "cache-control": "no-store", ...(allow ? { allow } : {}) });
       res.end(text);
     };
-    const fail = (status: number, code: string, message: string) => send(status, { error: { code, message } });
+    const fail = (status: number, code: string, message: string, allow?: string) => send(status, { error: { code, message } }, allow);
 
     const url = new URL(req.url ?? "/", "http://localhost");
-    if (url.pathname === "/v1/health") return req.method === "GET" ? send(200, { ok: true }) : fail(405, "method", "GET only");
+    if (url.pathname === "/v1/health") return req.method === "GET" || req.method === "HEAD" ? send(200, { ok: true }) : fail(405, "method", "GET only", "GET, HEAD");
 
     const m = /^Bearer (\S+)$/i.exec(req.headers.authorization ?? "");
     const actor = m ? store.actorForToken(m[1]!) : undefined;
     if (!actor) return fail(401, "unauthorized", "missing or invalid token");
 
-    if (url.pathname === "/v1/whoami") return req.method === "GET" ? send(200, { actor }) : fail(405, "method", "GET only");
+    if (url.pathname === "/v1/whoami") return req.method === "GET" || req.method === "HEAD" ? send(200, { actor }) : fail(405, "method", "GET only", "GET, HEAD");
 
     const op = /^\/v1\/ops\/([a-z-]+)$/.exec(url.pathname)?.[1];
     if (!op) return fail(404, "not-found", "no such route");
-    if (req.method !== "POST") return fail(405, "method", "POST only");
+    if (req.method !== "POST") return fail(405, "method", "POST only", "POST");
 
     let size = 0;
     const chunks: Buffer[] = [];

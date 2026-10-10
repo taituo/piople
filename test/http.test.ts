@@ -404,3 +404,23 @@ test("the Bearer scheme name is case-insensitive (RFC 7235), but a token must st
   await srv.close();
   store.close();
 });
+
+test("405 answers say which methods are allowed, and HEAD works wherever GET does", async () => {
+  const store = new Store(":memory:");
+  const token = store.issueToken("human:alice");
+  const srv = await boot(store);
+  const auth = { authorization: `Bearer ${token}` };
+  const op = await fetch(`${srv.url}/v1/ops/actor`, { method: "GET", headers: auth });
+  assert.equal(op.status, 405);
+  assert.equal(op.headers.get("allow"), "POST");
+  const health = await fetch(`${srv.url}/v1/health`, { method: "POST" });
+  assert.equal(health.status, 405);
+  assert.equal(health.headers.get("allow"), "GET, HEAD");
+  const head = await fetch(`${srv.url}/v1/health`, { method: "HEAD" });
+  assert.equal(head.status, 200);
+  assert.equal(await head.text(), "", "HEAD has no body");
+  assert.equal((await fetch(`${srv.url}/v1/whoami`, { method: "HEAD", headers: auth })).status, 200);
+  assert.equal((await fetch(`${srv.url}/v1/whoami`, { method: "HEAD" })).status, 401, "HEAD does not skip authentication");
+  await srv.close();
+  store.close();
+});
