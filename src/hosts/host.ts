@@ -155,6 +155,7 @@ export class Host {
     return {
       actor,
       context: d.context,
+      cursor: d.cursor,
       events: d.events,
       pending: d.pending,
       run: async (op, args = {}) => {

@@ -13,6 +13,8 @@ export interface CoreClient {
 export type Step = {
   actor: string;
   context: string;
+  /** The cursor this delivery started from. Stable across retries of the same delivery. */
+  cursor: number;
   /** Events after the actor's cursor, all actors, own included. */
   events: InboxDetail["events"];
   pending: Pending;
