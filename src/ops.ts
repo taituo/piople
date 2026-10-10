@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { ContextKind, Store } from "./core/index.ts";
 
 /**
@@ -271,5 +271,19 @@ export function runOp(s: Store, as: string, name: string, a: Args): unknown {
   }
   const missing = op.required.filter((k) => a[k] == null || a[k] === "" || (typeof a[k] === "string" && a[k].trim() === ""));
   if (missing.length) throw new Error(`missing: ${missing.join(",")}`);
-  return op.run(s, as, a);
+  // A key the caller chose (CLI --key, HTTP, MCP) names one request: pin the request to it. A key a host derived itself
+  // (`derived-key`) may legitimately come back with other content after a retry, so it stays permissive.
+  const explicitKey = a.key != null && a.key !== "" && a["derived-key"] !== true && (op.optional ?? []).includes("key");
+  return s.withCallHash(explicitKey ? requestHash(name, as, a) : null, () => op.run(s, as, a));
 }
+
+const canon = (v: unknown): string => {
+  if (Array.isArray(v)) return `[${v.map(canon).join(",")}]`;
+  if (v && typeof v === "object") return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon((v as Record<string, unknown>)[k])}`).join(",")}}`;
+  return JSON.stringify(v) ?? "null";
+};
+/** The same call always gives the same hash; the key itself and the internal marker are not part of the request. */
+const requestHash = (name: string, as: string, a: Args): string => {
+  const { key: _key, "derived-key": _derived, ...rest } = a;
+  return createHash("sha256").update(canon([name, as, rest])).digest("hex");
+};

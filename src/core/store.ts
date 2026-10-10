@@ -103,6 +103,11 @@ CREATE INDEX events_submitted ON events(context_id, json_extract(data,'$.submitt
   `
 CREATE TABLE host_leases (actor_id TEXT PRIMARY KEY REFERENCES actors(id), holder TEXT NOT NULL, epoch INTEGER NOT NULL, expires_at INTEGER NOT NULL);
 `,
+  // Migration 12: a hash of the call behind an event, set only when the caller chose the idempotency key itself. The same
+  // key with different content is then a key-conflict instead of a silent replay of the old event. NULL = no check.
+  `
+ALTER TABLE events ADD COLUMN args_hash TEXT;
+`,
 ];
 
 /** Ingress contexts are named ingress:<actor>; Core alone creates them, so nobody can squat on another actor's. */
@@ -142,7 +147,7 @@ type WorkRow = {
   status: string; claimed_by: string | null; attempt: number; lease_until: number | null; result: string | null;
   created_at: number; updated_at: number;
 };
-type Row = { seq: number; ts: number; type: string; context_id: string; actor_id: string; key: string; data: string };
+type Row = { seq: number; ts: number; type: string; context_id: string; actor_id: string; key: string; data: string; args_hash?: string | null };
 type Mutation = {
   type: EventType;
   contextId: Id;
@@ -204,6 +209,24 @@ export class Store {
     }
   }
 
+  /** Set around one op while it runs (see `withCallHash`); every event that op writes records it. */
+  private callHash: string | null = null;
+
+  /**
+   * Run `fn` (one op) with the hash of the caller's request. Used when the caller chose the idempotency key itself:
+   * replaying that key with the same request returns the old event, with another request it is a key-conflict.
+   * Operations are synchronous, so nothing else runs while the hash is set.
+   */
+  withCallHash<T>(hash: string | null, fn: () => T): T {
+    const before = this.callHash;
+    this.callHash = hash;
+    try {
+      return fn();
+    } finally {
+      this.callHash = before;
+    }
+  }
+
   /**
    * The only write path. In one transaction: check, replay lookup, side-table writes, event insert.
    * Replay (same context+key, same type+actor) returns the original event and writes nothing.
@@ -212,9 +235,13 @@ export class Store {
   private mutate(m: Mutation): PiopleEvent {
     return this.tx(() => {
       const lookup = () => {
-        const existing = this.db.prepare(`SELECT seq, ts, type, context_id, actor_id, key, data FROM events WHERE context_id=? AND key=?`).get(m.contextId, m.key) as Row | undefined;
+        const existing = this.db.prepare(`SELECT seq, ts, type, context_id, actor_id, key, data, args_hash FROM events WHERE context_id=? AND key=?`).get(m.contextId, m.key) as Row | undefined;
         if (existing && (existing.type !== m.type || existing.actor_id !== m.actorId)) {
           throw new Error(`key-conflict: ${m.key} in ${m.contextId} already used by ${existing.actor_id} for ${existing.type}`);
+        }
+        // A key the caller chose itself names one request: the same key with other content is not a replay.
+        if (existing && this.callHash && existing.args_hash && existing.args_hash !== this.callHash) {
+          throw new Error(`key-conflict: ${m.key} in ${m.contextId} was already used for a different request`);
         }
         return existing;
       };
@@ -234,7 +261,7 @@ export class Store {
         if (dup) throw new Error(`id-in-use: that ${dup[1]!.replace(/s$/, "")} id already exists with different content`);
         throw e;
       }
-      const info = this.db.prepare(`INSERT INTO events(ts,type,context_id,actor_id,key,data) VALUES(?,?,?,?,?,?)`).run(Date.now(), m.type, m.contextId, m.actorId, m.key, JSON.stringify(data));
+      const info = this.db.prepare(`INSERT INTO events(ts,type,context_id,actor_id,key,data,args_hash) VALUES(?,?,?,?,?,?,?)`).run(Date.now(), m.type, m.contextId, m.actorId, m.key, JSON.stringify(data), this.callHash);
       const row = this.db.prepare(`SELECT seq, ts, type, context_id, actor_id, key, data FROM events WHERE seq=?`).get(info.lastInsertRowid) as Row;
       return this.row(row);
     });
