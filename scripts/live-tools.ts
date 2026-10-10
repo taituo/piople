@@ -28,6 +28,8 @@ const pi = await PiHarness.open({
   actor: "agent:reader", dir: ":memory:", role: "You answer questions using the files you can read. Use your tools; never guess file contents.",
   provider: { baseUrl, apiKey }, modelId, maxTokens: 800, maxRounds: 6,
   environment: { name: "reader", tools: ["read_file", "list_dir"], files: { root: join(base, "docs") } },
+  nativeTools: !!process.env.LIVE_NATIVE,
+  onReply: process.env.LIVE_TRACE ? (e) => console.log(`   [reply ${e.requestId.split("#").at(-1)}] ${e.reply.replace(/\n/g, " ⏎ ").slice(0, 300) || "(empty)"}`) : undefined,
 });
 const host = new Host(core);
 host.onError = (e) => console.error("host error:", e.error);

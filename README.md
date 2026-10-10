@@ -362,8 +362,18 @@ own child process (`src/harnesses/tools.ts`, tools in `src/tools/`):
   waits for containers / network policy), and it **follows a symlink inside the directory that points outside**; the
   bundled tools close that with a realpath check, and a test fails if Node's behaviour changes. A harness that uses
   tools should run in its own process; synthetic agents and humans may share one.
-- Checked with real models (`scripts/live-tools.ts`): an agent reads a runbook inside its directory and is refused
-  when asked for a file outside; the canary in that file never reached it.
+- **Native Pi tools** (`nativeTools: true`): the profile's tools are offered as Pi tools (function calls) instead of the
+  `TOOL:` command. Each call is then a **durable Pi task**: the intent is committed before it runs, the result is a
+  tool message in the transcript, spend is accounted by Pi, and a call interrupted by a crash reruns on recovery
+  (the bundled tools only read, so they are declared `replay: "safe"`). The confinement is unchanged: the work still
+  runs through `runTool` in its own restricted child process. Pi's own `ExecutionEnv` (`NodeExecutionEnv`) confines
+  nothing (a `cwd`, and `bash` runs an unrestricted shell); isolation is meant to live in the environment, which is
+  what the child process provides. Pi's `beforeTool` hook is the natural place to gate a tool call on a Core decision
+  (not built yet).
+- Checked with real models (`scripts/live-tools.ts`, `LIVE_NATIVE=1` for native tools): an agent reads a runbook
+  inside its directory and is refused when asked for a file outside; the canary in that file never reached it.
+- **A reply with no command line and no `NOOP` is not silence**: the model is told once ("nothing happened") and may
+  answer. Found live: a reasoning model sometimes ends a tool round with an empty reply, and the person got no answer.
 
 
 ### One host per actor

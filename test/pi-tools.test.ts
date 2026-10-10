@@ -80,3 +80,37 @@ test("credentials never reach the model: not in the system text, the prompts or 
   }
   store.close();
 });
+
+test("native tools: the model calls a Pi tool, the confined runner does the work, the result is a tool message in the transcript", async () => {
+  const { profile, base } = area();
+  const { store, alice, open } = await setupNative(profile);
+  const lastTool = (m: any[]) => [...m].reverse().find((x) => x.role === "tool");
+  const model = await fakeModel((m, n) => {
+    if (n === 1) return { toolCall: { name: "read_file", args: { path: "notes.txt" } } };
+    if (n === 2) return /deploy key rotates on friday/.test(JSON.stringify(lastTool(m)?.content)) ? { toolCall: { name: "read_file", args: { path: "../secret.txt" } } } : "POST: no content";
+    if (n === 3) return /REFUSED read_file: denied: outside the allowed directory/.test(JSON.stringify(lastTool(m)?.content)) ? "POST: friday, and the other file is off limits" : "POST: wrong";
+    return "NOOP";
+  });
+  const host = new Host(new LocalCore(store));
+  await host.add({ actor: "agent:pi", harness: await open(model.baseUrl) });
+  await alice("post", { context: "c1", text: "what do the notes say?" });
+  await host.settle();
+  assert.deepEqual(store.eventsSince("c1", 0).filter((e) => e.type === "message.posted" && e.actorId === "agent:pi").map((e) => e.data.text), ["friday, and the other file is off limits"]);
+  const offered = (model.bodies[0]!.tools as Array<{ function: { name: string } }>).map((t) => t.function.name).sort();
+  assert.deepEqual(offered, ["list_dir", "read_file"], "the profile's tools are offered as function tools, and nothing else");
+  assert.ok(!JSON.stringify(model.requests).includes("OUTSIDE-SECRET"));
+  assert.doesNotMatch(JSON.stringify(model.requests[0]![0]), /TOOL: <name>/, "the text command is not offered in native mode");
+  void base;
+  await host.close();
+  await model.close();
+  store.close();
+});
+
+async function setupNative(environment: EnvironmentProfile) {
+  const store = new Store(":memory:");
+  const core = new LocalCore(store);
+  const alice = (op: string, a: Record<string, unknown> = {}) => core.call("human:alice", op, a) as Promise<any>;
+  await alice("create", { id: "c1", title: "t" });
+  await alice("join", { context: "c1", actor: "agent:pi", caps: "read,write" });
+  return { store, core, alice, open: (baseUrl: string) => PiHarness.open({ actor: "agent:pi", dir: ":memory:", role: "You read files.", provider: { baseUrl }, modelId: "fake-1", maxRounds: 6, environment, nativeTools: true }) };
+}

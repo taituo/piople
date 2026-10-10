@@ -1,14 +1,14 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { createModels, createProvider, type Models } from "@earendil-works/pi-ai";
+import { Type, createModels, createProvider, type Models } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { Harness as PiRuntime, createRegistry, type Conversation } from "@earendil-works/pi-durable";
+import { Harness as PiRuntime, createRegistry, defineExtension, defineTool, type Conversation } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { Harness, Step } from "../hosts/types.ts";
 import { CaseMemory, type MemEvent, type Summarizer } from "./memory.ts";
-import { describeTools, runTool, type EnvironmentProfile } from "./tools.ts";
+import { TOOLS, describeTools, runTool, type EnvironmentProfile } from "./tools.ts";
 
 /**
  * A Pi-backed participant. The only file that imports Pi.
@@ -43,6 +43,13 @@ export type PiHarnessOptions = {
    * Without a profile the agent has no tools, whatever it writes.
    */
   environment?: EnvironmentProfile;
+  /**
+   * With an environment: offer its tools as Pi tools (function calls) instead of the `TOOL:` command. Each call is then a
+   * durable Pi task: its intent is committed before it runs, it shows in the transcript as a tool result, and a call
+   * interrupted by a crash reruns on recovery (the bundled tools only read, so they are declared replay-safe). The
+   * confinement is the same: the call still runs through `runTool` in its own restricted child process.
+   */
+  nativeTools?: boolean;
   /** Called with every model reply (and the prompt that produced it) before it is parsed: for audit and debugging. */
   onReply?: (e: { requestId: string; prompt: string; reply: string }) => void;
 };
@@ -145,8 +152,10 @@ export class PiHarness implements Harness {
       CREATE TABLE IF NOT EXISTS turns (request_id TEXT PRIMARY KEY, reply TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS failed (request_id TEXT PRIMARY KEY, n INTEGER NOT NULL);`);
     const storage = await openNodeSqliteStorage(piPath);
+    const registry = createRegistry();
+    if (o.environment && o.nativeTools) registry.install(environmentExtension(o.environment));
     const rt = await PiRuntime.open(storage, {
-      models: createPiModels(o), registry: createRegistry(), settings: { retry: { maxRetries: 1 } },
+      models: createPiModels(o), registry, settings: { retry: { maxRetries: 1 } },
     } as never, BACKGROUND_CONTEXT);
     rt.resume();
     const memory = o.memory ? CaseMemory.open(o.dir === ":memory:" ? ":memory:" : join(o.dir, `${safe}.memory.sqlite`), o.memory) : undefined;
@@ -176,13 +185,21 @@ export class PiHarness implements Harness {
       if (v.nodes > 0) prompt = `Case memory (older events are folded into summaries; reply ZOOM: <id> to read the original lines behind one):\n${v.text}\n\n${prompt}`;
     }
     const base = `${s.actor}@${s.context}#${s.cursor}`;
+    let nudged = false;
     for (let round = 0; round < (this.o.maxRounds ?? 3) && prompt !== null; round++) {
       const reply = await this.ask(conv, `${base}.r${round}`, prompt);
       this.o.onReply?.({ requestId: `${base}.r${round}`, prompt, reply });
       const feedback: string[] = [];
-      for (const c of parseCommands(reply)) {
+      const commands = parseCommands(reply);
+      for (const c of commands) {
         const note = await this.exec(s, c);
         if (note) feedback.push(note);
+      }
+      // Nothing to execute and no explicit NOOP is not "nothing to do": the model answered in prose, or said nothing
+      // (a reasoning model can spend its output on thinking). Say so once, so a person is not left without an answer.
+      if (!commands.length && !/\bNOOP\b/.test(reply) && !nudged) {
+        nudged = true;
+        feedback.push("Your reply contained no command line, so nothing happened. If you have something to say, write it as a command line (for example POST: ...). If there is nothing to do, reply NOOP.");
       }
       prompt = feedback.length ? `${feedback.join("\n")}\nContinue, or reply NOOP.` : null;
     }
@@ -271,7 +288,7 @@ export class PiHarness implements Harness {
     }
     const conv = await this.rt.createConversation({
       ownership: { kind: "ownerless" },
-      agent: { model: this.model, instructions: `${this.o.role}\n\nYou are ${this.actor}.\n\n${protocol(!!this.memory, this.o.environment ? describeTools(this.o.environment) : [])}` },
+      agent: { model: this.model, instructions: `${this.o.role}\n\nYou are ${this.actor}.\n\n${protocol(!!this.memory, this.o.environment && !this.o.nativeTools ? describeTools(this.o.environment) : [])}${this.o.environment && this.o.nativeTools ? "\n\nYou also have file tools you can call directly (function calls). Use them first if you need file contents, then reply with command lines." : ""}` },
     } as never, BACKGROUND_CONTEXT);
     this.map.prepare(`INSERT INTO convs(context_id,conv_id) VALUES(?,?) ON CONFLICT(context_id) DO UPDATE SET conv_id=excluded.conv_id`).run(contextId, Number(conv.id));
     return conv;
@@ -330,6 +347,25 @@ export class PiHarness implements Harness {
     }
     return { found: items.length > 0, reply, error, usage: { input, output } };
   }
+}
+
+const TOOL_SCHEMAS = {
+  read_file: { summary: "Read one text file under your directory.", parameters: Type.Object({ path: Type.String({ description: "path relative to your directory" }), maxBytes: Type.Optional(Type.Number()) }) },
+  list_dir: { summary: "List a directory under your directory.", parameters: Type.Object({ path: Type.Optional(Type.String({ description: "relative path, default ." })) }) },
+} as const;
+
+/** The profile's tools as a Pi extension. The work stays in runTool (a confined child process); Pi supplies durability. */
+function environmentExtension(profile: EnvironmentProfile) {
+  const text = (t: string) => [{ type: "text" as const, text: t }];
+  const tools = profile.tools.filter((n): n is keyof typeof TOOL_SCHEMAS => n in TOOL_SCHEMAS && n in TOOLS).map((name) =>
+    defineTool({
+      name, description: TOOL_SCHEMAS[name].summary, parameters: TOOL_SCHEMAS[name].parameters as never, replay: "safe",
+      execute: async (args: unknown) => {
+        const r = await runTool(profile, name, args);
+        return r.ok ? { content: text(r.output) } : { isError: true, content: text(`REFUSED ${name}: ${r.error}`) };
+      },
+    } as never));
+  return defineExtension({ name: "piople-env", tools: tools as never });
 }
 
 function createPiModels(o: PiHarnessOptions): Models {

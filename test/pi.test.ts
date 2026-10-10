@@ -203,3 +203,35 @@ test("a failed model call is an error, not an empty answer: the delivery is retr
   await model.close();
   store.close();
 });
+
+test("a reply with no command and no NOOP is not silence: the model is told once and can still answer", async () => {
+  const { store, alice } = world();
+  const model = await fakeModel((_m, n) => (n === 1 ? "The capital of Finland is Helsinki." : n === 2 ? "POST: Helsinki" : "NOOP"));
+  const host = new Host(new LocalCore(store));
+  await host.add({ actor: "agent:pi", harness: await PiHarness.open(piOpts(model.baseUrl)) });
+  await alice("create", { id: "c1", title: "t" });
+  await alice("join", { context: "c1", actor: "agent:pi", caps: "read,write" });
+  await alice("post", { context: "c1", text: "capital of Finland?" });
+  await host.settle();
+  assert.match(lastUser(model.requests[1]!), /contained no command line/);
+  assert.deepEqual(posts(store), ["Helsinki"]);
+  await host.close();
+  await model.close();
+  store.close();
+});
+
+test("the reminder is given once per delivery: a model that keeps writing prose does not loop", async () => {
+  const { store, alice } = world();
+  const model = await fakeModel(() => "just prose, no commands");
+  const host = new Host(new LocalCore(store));
+  await host.add({ actor: "agent:pi", harness: await PiHarness.open(piOpts(model.baseUrl)) });
+  await alice("create", { id: "c1", title: "t" });
+  await alice("join", { context: "c1", actor: "agent:pi", caps: "read,write" });
+  await alice("post", { context: "c1", text: "hello" });
+  await host.settle();
+  assert.equal(model.requests.length, 2, "one reply and one reminder, then it stops");
+  assert.deepEqual(posts(store), []);
+  await host.close();
+  await model.close();
+  store.close();
+});
