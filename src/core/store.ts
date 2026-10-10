@@ -184,10 +184,12 @@ export class Store {
 
   private migrate() {
     this.db.exec(`CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);`);
-    const row = this.db.prepare(`SELECT v FROM meta WHERE k='version'`).get() as { v: string } | undefined;
-    const version = row ? Number(row.v) : 0;
-    for (let i = version; i < MIGRATIONS.length; i++) {
+    const current = () => Number((this.db.prepare(`SELECT v FROM meta WHERE k='version'`).get() as { v: string } | undefined)?.v ?? 0);
+    for (let i = current(); i < MIGRATIONS.length; i++) {
       this.tx(() => {
+        // Read again now that this process holds the write lock: another process opening the same old database may have
+        // applied this step while we waited (an ALTER TABLE run twice fails with "duplicate column name").
+        if (current() > i) return;
         this.db.exec(MIGRATIONS[i]!);
         this.db.prepare(`INSERT INTO meta(k,v) VALUES('version',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v`).run(String(i + 1));
       });
