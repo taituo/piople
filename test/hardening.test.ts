@@ -209,6 +209,8 @@ test("ids cannot contain control characters: an ESC sequence in an id would driv
   assert.throws(() => store.createContext({ id: `x${ESC}y`, kind: "case", title: "t", goal: "", createdAt: 1 }, "human:alice"), /bad-context/, "also straight at the Store");
   await alice("post", { context: "c1", text: `text may still contain ${ESC}: it is printed through printable() where it is shown to a person` });
   await alice("create", { id: "ääkköset-😀-ok", title: "t" }); // non-ASCII ids stay fine
+});
+
 test("deeply nested JSON is refused with a plain 400, not a stack overflow (HTTP 500)", async () => {
   const { alice, store } = world();
   await alice("create", { id: "c1", title: "t" });
