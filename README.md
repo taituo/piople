@@ -24,7 +24,8 @@ src/cli/       one process = one op, JSON on stdout
 src/mcp/       stdio JSON-RPC; same ops as tools piople_<op>
 src/http/      Core over HTTP: POST /v1/ops/<op>, identity = bearer token
 src/hosts/     Harness contract + Host (+ HttpCore client): many participants per process
-src/harnesses/ synthetic.ts (no model) and pi.ts (the only file that imports Pi)
+src/harnesses/ synthetic.ts (no model), router.ts + jev.ts (routing), pi.ts (the only file that imports Pi)
+src/eval/      routing evaluation: labelled messages -> measured thresholds
 test/          core rules in-process; CLI+MCP+Host as real processes; boundary tests
 ```
 
@@ -167,6 +168,31 @@ const router = new RouterHarness({
   429/5xx leave messages pending and are retried.
 - `test/jev.test.ts` runs against a local stand-in endpoint. `test/jev.live.test.ts` calls the real one and is
   skipped unless `OPENROUTER_API_KEY` (or `JEV_API_KEY`) and `JEV_MODEL` are set.
+
+### Measuring routing before trusting it
+
+```sh
+node src/eval/main.ts                                  # keyword baseline on eval/routing-synthetic.json
+node src/eval/main.ts --dataset my-messages.json --target-precision 0.95 [--json]
+OPENROUTER_API_KEY=... JEV_MODEL=<exact id> node src/eval/main.ts --classifier jev --send-to-external --dataset my-messages.json
+```
+
+A dataset is a small world (contexts, who is a member where) plus labelled messages: `{id, sender, text, expect}`
+where `expect` is the destination a reasonable person would pick among what that sender may address, or `null`
+when the message should stay unrouted. The runner builds the world, submits every message and runs the router in
+**shadow mode** (nothing is delivered), then reports per `minConfidence`: how many messages are routed, how many
+are right, false routes, precision, coverage and the share of right destinations found, plus latency.
+
+- **The threshold is measured, not invented.** The suggestion is the lowest `minConfidence` that reaches your
+  target precision with enough routed messages, with a 95% Wilson lower bound; it says "not yet confident" when
+  the dataset is too small, and "no threshold reaches the target" when none does.
+- A message the sender cannot route anywhere is part of the measurement (`expect: null`); so are senders
+  without access, other languages, and off-topic text that shares words with a channel (see the synthetic set).
+- Evaluating an external classifier shows the dataset's texts and destination names to an outside service: it
+  requires `--send-to-external`.
+- `eval/routing-synthetic.json` was written together with the keyword baseline. It exercises the harness and
+  shows failure modes; **it says nothing about real traffic**. Build a dataset from your own messages.
+- Not measurable offline: how often people re-route by hand, and latency/cost under production load.
 
 ### Inbox: a participant need not be running
 
