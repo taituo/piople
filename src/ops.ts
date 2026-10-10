@@ -85,13 +85,29 @@ export const OPS: Record<string, Op> = {
   },
   inbox: {
     description: "What I owe attention: without --context a summary of all my cases; with it the events after my cursor plus pending asks and decisions",
-    required: [], optional: ["context", "limit"],
-    run: (s, as, a) => (a.context == null ? s.inbox(as) : s.inboxOf(str(a, "context"), as, Number(a.limit ?? 200))),
+    required: [], optional: ["context", "limit", "holder"],
+    run: (s, as, a) => {
+      s.requireHolder(as, a.holder == null ? undefined : String(a.holder));
+      return a.context == null ? s.inbox(as) : s.inboxOf(str(a, "context"), as, Number(a.limit ?? 200));
+    },
   },
   ack: {
     description: "Move my read cursor forward to --seq (never back). Does not resolve pending items",
-    required: ["context", "seq"],
-    run: (s, as, a) => ({ cursor: s.ack(str(a, "context"), as, Number(a.seq)) }),
+    required: ["context", "seq"], optional: ["holder"],
+    run: (s, as, a) => {
+      s.requireHolder(as, a.holder == null ? undefined : String(a.holder));
+      return { cursor: s.ack(str(a, "context"), as, Number(a.seq)) };
+    },
+  },
+  "host-lease": {
+    description: "Acquire or renew the lease on my inbox for this host process. Refused (already-hosted) while another holder's lease is live; then only the holder may inbox/ack",
+    required: ["holder"], optional: ["ttl-ms"],
+    run: (s, as, a) => s.hostLease(as, str(a, "holder"), a["ttl-ms"] == null ? 30_000 : Number(a["ttl-ms"])),
+  },
+  "host-release": {
+    description: "Give up my inbox lease at once (the holder only)",
+    required: ["holder"],
+    run: (s, as, a) => (s.hostRelease(as, str(a, "holder")), { released: true }),
   },
   "work-request": {
     mintsId: true,

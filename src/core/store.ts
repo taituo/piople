@@ -99,6 +99,10 @@ CREATE INDEX route_queue_seq ON route_queue(seq);
 CREATE INDEX events_type ON events(type, seq);
 CREATE INDEX events_submitted ON events(context_id, json_extract(data,'$.submittedKey'));
 `,
+  // Migration 11: one host per actor. A lease names the process that consumes an actor's inbox; epoch counts takeovers.
+  `
+CREATE TABLE host_leases (actor_id TEXT PRIMARY KEY REFERENCES actors(id), holder TEXT NOT NULL, epoch INTEGER NOT NULL, expires_at INTEGER NOT NULL);
+`,
 ];
 
 /** Ingress contexts are named ingress:<actor>; Core alone creates them, so nobody can squat on another actor's. */
@@ -381,6 +385,39 @@ export class Store {
         return { by, reason: by === target ? "left" : "removed", reopenedWork: reopened.filter((r) => r.context === contextId).map((r) => r.work) };
       },
     });
+  }
+
+  /**
+   * Acquire or renew the lease on an actor's inbox. A different holder is refused (`already-hosted`) while the
+   * lease is live; after it expires or is released the next holder takes over and `epoch` moves on, so a paused
+   * host that wakes up can no longer ack (see requireHolder). Not an event: it is operational state, like a cursor.
+   */
+  hostLease(actorId: Id, holder: string, ttlMs: number, now = Date.now()): { holder: string; epoch: number; expiresAt: number } {
+    if (!holder || /\s/.test(holder) || holder.length > 200) throw new Error(`bad-holder: ${JSON.stringify(holder)}`);
+    if (!Number.isInteger(ttlMs) || ttlMs < 1 || ttlMs > 3_600_000) throw new Error(`bad-ttl: ${ttlMs} (whole milliseconds, 1 to 3600000)`);
+    return this.tx(() => {
+      if (!this.db.prepare(`SELECT 1 FROM actors WHERE id=?`).get(actorId)) throw new Error(`unknown-actor: ${actorId}`);
+      const row = this.db.prepare(`SELECT holder, epoch, expires_at FROM host_leases WHERE actor_id=?`).get(actorId) as { holder: string; epoch: number; expires_at: number } | undefined;
+      if (row && row.holder !== holder && row.expires_at > now) throw new Error(`already-hosted: ${actorId} is served by another host until ${new Date(row.expires_at).toISOString()}`);
+      const epoch = !row ? 1 : row.holder === holder ? row.epoch : row.epoch + 1;
+      this.db.prepare(`INSERT INTO host_leases(actor_id,holder,epoch,expires_at) VALUES(?,?,?,?)
+        ON CONFLICT(actor_id) DO UPDATE SET holder=excluded.holder, epoch=excluded.epoch, expires_at=excluded.expires_at`).run(actorId, holder, epoch, now + ttlMs);
+      return { holder, epoch, expiresAt: now + ttlMs };
+    });
+  }
+
+  /** Give the lease up at once. Only the holder can; the epoch stays so the next holder still counts as a takeover. */
+  hostRelease(actorId: Id, holder: string): void {
+    this.tx(() => {
+      this.db.prepare(`UPDATE host_leases SET expires_at=0 WHERE actor_id=? AND holder=?`).run(actorId, holder);
+    });
+  }
+
+  /** While an actor's lease is live only its holder may consume the inbox (inbox, ack). No live lease: as before. */
+  requireHolder(actorId: Id, holder: string | undefined, now = Date.now()): void {
+    const row = this.db.prepare(`SELECT holder, expires_at FROM host_leases WHERE actor_id=?`).get(actorId) as { holder: string; expires_at: number } | undefined;
+    if (!row || row.expires_at <= now || row.holder === holder) return;
+    throw new Error(`already-hosted: ${actorId} is served by another host${holder ? ` (not ${holder})` : " (pass the holder)"}`);
   }
 
   /** How many times an actor has been removed from a context. Part of join's default key, so a rejoin after a removal is a new join, not a replay of the old one. */

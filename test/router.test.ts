@@ -173,6 +173,7 @@ test("a message the classifier keeps rejecting is left unresolved after a few at
   assert.equal(posted(store, "ch-incidents").length, 1, "the healthy message was delivered");
   assert.equal(errors.length, 2, "two failed passes, the third attempt gave up on it");
 
+  await host.close(); // one host per actor: the first gives the router up before another serves it
   const config: Classifier = { name: "k", version: "2", async classify() { throw new ClassifierError("config", "bad key"); } };
   const host2 = await hostWith(store, new RouterHarness({ classifier: config, mode: "enforce", minConfidence: 0.5, ruleVersion: "r1" }));
   host2.onError = () => {};

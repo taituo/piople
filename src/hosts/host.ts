@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { InboxDetail, InboxSummary, Store } from "../core/index.ts";
 import { OPS, runOp, type Args } from "../ops.ts";
 import type { CoreClient, Harness, Step } from "./types.ts";
@@ -13,7 +14,7 @@ export class LocalCore implements CoreClient {
 }
 
 export type HostError = { actor: string; context: string; error: unknown };
-type Entry = { actor: string; harness: Harness; recovered: boolean; failures: number };
+type Entry = { actor: string; harness: Harness; recovered: boolean; failures: number; leaseUntil: number };
 
 /**
  * One process, many harnesses, each its own actor. The host only delivers: it polls each actor's
@@ -28,17 +29,29 @@ export class Host {
   private readonly sleepers = new Set<() => void>();
   onError: (e: HostError) => void = () => {};
   private readonly core: CoreClient;
-  private readonly opts: { pollMs?: number };
+  private readonly opts: { pollMs?: number; holder?: string; leaseMs?: number };
+  /** Names this host process to Core. Give a stable one to a service that restarts, so the restart renews its own lease instead of waiting for it to expire. */
+  readonly holder: string;
+  private readonly leaseMs: number;
 
-  constructor(core: CoreClient, opts: { pollMs?: number } = {}) {
+  constructor(core: CoreClient, opts: { pollMs?: number; holder?: string; leaseMs?: number } = {}) {
     this.core = core;
     this.opts = opts;
+    this.holder = opts.holder ?? `host-${randomUUID().slice(0, 8)}`;
+    this.leaseMs = opts.leaseMs ?? 30_000;
+  }
+
+  /** Take or renew the lease on an actor's inbox. Another live host for the same actor makes this throw `already-hosted`. */
+  private async lease(e: Entry): Promise<void> {
+    const l = (await this.core.call(e.actor, "host-lease", { holder: this.holder, "ttl-ms": this.leaseMs })) as { expiresAt: number };
+    e.leaseUntil = l.expiresAt;
   }
 
   async add(o: { actor: string; harness: Harness; name?: string; skills?: string[] }): Promise<void> {
     if (this.entries.has(o.actor)) throw new Error(`already-hosted: ${o.actor}`);
     await this.core.call(o.actor, "actor", { name: o.name ?? o.actor, ...(o.skills ? { skills: o.skills.join(",") } : {}) });
-    const entry: Entry = { actor: o.actor, harness: o.harness, recovered: false, failures: 0 };
+    const entry: Entry = { actor: o.actor, harness: o.harness, recovered: false, failures: 0, leaseUntil: 0 };
+    await this.lease(entry); // refused if another host is live for this actor; nothing is registered then
     this.entries.set(o.actor, entry);
     if (this.running) this.loops.push(this.loop(entry));
   }
@@ -63,10 +76,12 @@ export class Host {
     const first = !e.recovered;
     let steps = 0;
     let stepFailed = false;
-    const summary = (await this.core.call(actor, "inbox")) as InboxSummary[];
+    if (Date.now() > e.leaseUntil - this.leaseMs / 2) await this.lease(e);
+    const holder = this.holder;
+    const summary = (await this.core.call(actor, "inbox", { holder })) as InboxSummary[];
     for (const s of summary) {
       if (s.unread === 0 && !(first && s.pending > 0)) continue;
-      const detail = (await this.core.call(actor, "inbox", { context: s.context })) as InboxDetail;
+      const detail = (await this.core.call(actor, "inbox", { context: s.context, holder })) as InboxDetail;
       steps++;
       try {
         await e.harness.step(this.makeStep(actor, detail));
@@ -79,11 +94,11 @@ export class Host {
       }
       const last = detail.events.at(-1)?.seq;
       if (last === undefined) continue;
-      await this.core.call(actor, "ack", { context: s.context, seq: last });
+      await this.core.call(actor, "ack", { context: s.context, seq: last, holder });
       // What the step itself wrote sits right after `last`; skip past it, but never past anyone else's event.
-      const rest = ((await this.core.call(actor, "inbox", { context: s.context })) as InboxDetail).events;
+      const rest = ((await this.core.call(actor, "inbox", { context: s.context, holder })) as InboxDetail).events;
       if (rest.length > 0 && rest.every((ev) => ev.actorId === actor)) {
-        await this.core.call(actor, "ack", { context: s.context, seq: rest.at(-1)!.seq });
+        await this.core.call(actor, "ack", { context: s.context, seq: rest.at(-1)!.seq, holder });
       }
     }
     if (e.harness.poll) {
@@ -135,7 +150,10 @@ export class Host {
 
   async close(): Promise<void> {
     await this.stop();
-    for (const e of this.entries.values()) await e.harness.close?.();
+    for (const e of this.entries.values()) {
+      await e.harness.close?.();
+      await this.core.call(e.actor, "host-release", { holder: this.holder }).catch(() => {}); // best effort: the lease expires anyway
+    }
   }
 
   private async loop(e: Entry): Promise<void> {

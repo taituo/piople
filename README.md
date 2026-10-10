@@ -289,6 +289,20 @@ Not yet: a continuously-running human harness (a human uses the CLI, which is a
 short-lived participant), environments (tools/filesystem/network per harness), and
 anything over a network — `CoreClient` is the seam for that (phase D).
 
+### One host per actor
+
+A host takes a **lease** on each actor it serves (`host-lease`, a TTL in Core; not an event). While the lease
+is live, a second host for the same actor is refused (`already-hosted`, 409) and only the holder may `inbox` and
+`ack` for it, so nothing is processed twice. `Host` acquires at `add`, renews when half the TTL has passed and
+releases at `close`. A holder that comes back after another took over (a paused process waking up) has its `ack`
+refused, so it cannot move the cursor; the cursor lives in Core, so the new holder resumes where the actor was.
+
+- `new Host(core, { holder, leaseMs })`: `holder` defaults to a random id. Give a service a **stable** one, so a
+  restart after a crash renews its own lease at once instead of waiting for it to expire. `leaseMs` defaults to 30 s.
+- Writes made through `step.run` are not fenced: they are idempotent by key. An actor without a lease (a human
+  using the CLI) behaves as before.
+- The lease is operational state, not authority: it grants nothing and Core's membership rules are unchanged.
+
 ## Across processes and machines
 
 ```sh
@@ -325,7 +339,7 @@ const host = new Host(core);
   stale claim, not open), 400 bad request, 413 too large.
 - **Plain HTTP.** A bearer token is a password: terminate TLS in front (ingress, proxy), keep
   the port off the open internet. There is no push channel yet; hosts poll their inbox.
-- Not in this phase: signature-based identity, multi-node Core, rate limiting, long-poll/SSE, preventing two hosts from serving the same actor (run one replica per actor).
+- Not in this phase: signature-based identity, multi-node Core, rate limiting, long-poll/SSE.
 
 ## Not built yet
 
@@ -333,3 +347,4 @@ const host = new Host(core);
 - A continuously running **human harness** (a human uses the CLI, a short-lived participant).
 - **Kubernetes / Temporal** adapters.
 - Push delivery (SSE/long-poll), signature-based identity, a multi-node Core.
+
