@@ -164,8 +164,10 @@ type Mutation = {
 
 /** One read never returns more than this many events; page with the cursor. */
 export const MAX_READ = 1000;
+/** The longest claim lease: a holder that dies keeps its work this long at most. Without a bound, 1e14 ms (3000 years) made a claim permanent. */
+export const MAX_LEASE_MS = 7 * 24 * 3600 * 1000;
 const checkLease = (leaseMs: number | undefined) => {
-  if (leaseMs !== undefined && !(Number.isInteger(leaseMs) && leaseMs > 0)) throw new Error(`bad-lease: ${leaseMs} (positive whole milliseconds)`);
+  if (leaseMs !== undefined && !(Number.isInteger(leaseMs) && leaseMs > 0 && leaseMs <= MAX_LEASE_MS)) throw new Error(`bad-lease: ${leaseMs} (whole milliseconds, 1 to ${MAX_LEASE_MS})`);
 };
 const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
 
@@ -257,6 +259,7 @@ export class Store {
         data = m.write?.() ?? {};
       } catch (e) {
         // Reusing an id with a different request must be a clean conflict, not a database error text.
+        if (/UNIQUE constraint failed: events\.context_id, events\.key/.test(e instanceof Error ? e.message : "")) throw new Error(`key-conflict: a key this request needs is already used in a context it touches`);
         const dup = /UNIQUE constraint failed: (\w+)\.(?:\w+, \w+\.)?id\b/.exec(e instanceof Error ? e.message : "");
         if (dup) throw new Error(`id-in-use: that ${dup[1]!.replace(/s$/, "")} id already exists with different content`);
         throw e;
@@ -414,8 +417,9 @@ export class Store {
           this.db.prepare(`DELETE FROM members WHERE context_id=? AND actor_id=?`).run(c, target);
           this.db.prepare(`DELETE FROM cursors WHERE context_id=? AND actor_id=?`).run(c, target);
           if (c !== contextId) {
+            // One key per context: the caller's key is taken in the realm itself and may be taken in an inner context.
             this.db.prepare(`INSERT INTO events(ts,type,context_id,actor_id,key,data) VALUES(?,?,?,?,?,?)`).run(
-              Date.now(), "member.removed", c, target, `${key}`, JSON.stringify({ by, reason: "realm-removed", realm: contextId, reopenedWork: reopened.filter((r) => r.context === c).map((r) => r.work) }),
+              Date.now(), "member.removed", c, target, `${key}@${c}`, JSON.stringify({ by, reason: "realm-removed", realm: contextId, reopenedWork: reopened.filter((r) => r.context === c).map((r) => r.work) }),
             );
           }
         }
@@ -608,6 +612,8 @@ export class Store {
   }
 
   promoteObservation(artifactId: Id, by: Id, status: "confirmed" | "refuted"): PiopleEvent {
+    // The op layer passes text through: "banana", "CONFIRMED" and even "hypothesis" (undoing a finding) were accepted.
+    if (status !== "confirmed" && status !== "refuted") throw new Error(`bad-status: ${JSON.stringify(String(status).slice(0, 40))} is not confirmed or refuted`);
     const a = this.db.prepare(`SELECT context_id FROM artifacts WHERE id=?`).get(artifactId) as { context_id: string } | undefined;
     if (!a) throw new Error(`unknown-artifact: ${artifactId}`);
     return this.mutate({
@@ -622,7 +628,10 @@ export class Store {
 
   /** Skills are self-declared routing hints. They never grant anything. */
   setSkills(actorId: Id, skills: string[]): void {
-    const info = this.db.prepare(`UPDATE actors SET skills=? WHERE id=?`).run(JSON.stringify([...new Set(skills)].sort()), actorId);
+    // Declared skills are read on every claim check: bound them, so one actor cannot make that work grow without limit.
+    const unique = [...new Set(skills)];
+    if (unique.length > 100 || unique.some((k) => k.length > 200)) throw new Error(`bad-skills: at most 100 skills of at most 200 characters each`);
+    const info = this.db.prepare(`UPDATE actors SET skills=? WHERE id=?`).run(JSON.stringify(unique.sort()), actorId);
     if (info.changes !== 1) throw new Error(`unknown-actor: ${actorId}`);
   }
 
@@ -1105,6 +1114,8 @@ export class Store {
   }
 
   readEvents(contextId: Id, actorId: Id, afterSeq: number, limit = 200): PiopleEvent[] {
+    // A cursor that is not a number must not read as "nothing new": `seq > NaN` matches nothing, and a reader would wait for ever.
+    if (typeof afterSeq !== "number" || Number.isNaN(afterSeq) || afterSeq === Infinity) throw new Error(`bad-seq: ${String(afterSeq)}`);
     this.mustMember(contextId, actorId, "read");
     return this.eventsSince(contextId, afterSeq, limit);
   }

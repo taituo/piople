@@ -93,3 +93,105 @@ test("size limits hold for every caller, not only HTTP: a huge title, id or mess
   assert.deepEqual(statusFor("too-large: text is 5 characters, the limit is 1"), { status: 413, code: "too-large" });
   store.close();
 });
+
+test("promote takes only confirmed or refuted; anything else is refused and the finding keeps its status", async () => {
+  const { alice, store } = world();
+  await alice("create", { id: "c1", title: "t" });
+  await alice("observe", { context: "c1", id: "o1", text: "the pool is empty" });
+  for (const bad of ["banana", "CONFIRMED", "hypothesis", "confirmed "]) await assert.rejects(alice("promote", { artifact: "o1", status: bad }), /bad-status/, bad);
+  const status = () => (store.db.prepare("SELECT status FROM artifacts WHERE id='o1'").get() as { status: string }).status;
+  assert.equal(status(), "hypothesis", "nothing changed");
+  await alice("promote", { artifact: "o1", status: "confirmed" });
+  assert.equal(status(), "confirmed");
+  await alice("promote", { artifact: "o1", status: "refuted" });
+  assert.equal(status(), "refuted", "a finding may still be refuted later");
+  store.close();
+});
+
+test("presence: the state and echo flag are checked; a typo must not silently turn echo off", async () => {
+  const { alice, store } = world();
+  await alice("create", { id: "c1", title: "t" });
+  for (const bad of ["banana", "AWAY", "Active"]) await assert.rejects(alice("presence", { state: bad }), /bad-state/, bad);
+  for (const bad of ["yes", "1", "maybe", 2]) await assert.rejects(alice("presence", { state: "away", echo: bad }), /bad-echo/, String(bad));
+  const row = () => store.db.prepare("SELECT state, echo FROM presence WHERE actor_id='human:alice'").get() as { state: string; echo: number } | undefined;
+  assert.equal(row(), undefined, "refused calls changed nothing");
+  await alice("presence", { state: "away", echo: "true" });
+  assert.deepEqual({ ...row() }, { state: "away", echo: 1 });
+  await alice("presence", { state: "active", echo: false });
+  assert.deepEqual({ ...row() }, { state: "active", echo: 0 });
+  await alice("presence", { state: "silent" }); // echo omitted: off
+  assert.deepEqual({ ...row() }, { state: "silent", echo: 0 });
+  store.close();
+});
+
+test("yes/no arguments are true or false; a typo is an error, so `retry yes` cannot silently end a work item for good", async () => {
+  const { alice, store } = world();
+  await alice("create", { id: "c1", title: "t" });
+  await alice("work-request", { context: "c1", id: "w1", to: "human:alice", input: "{}" });
+  const claim = await alice("work-claim", { context: "c1", id: "w1" });
+  for (const bad of ["yes", "1", "True", "TRUE", 1]) await assert.rejects(alice("work-fail", { context: "c1", id: "w1", attempt: claim.work.attempt, reason: "x", retry: bad }), /bad-flag/, String(bad));
+  assert.equal(store.getWork("c1", "w1")!.status, "claimed", "the refused calls changed nothing");
+  await alice("work-fail", { context: "c1", id: "w1", attempt: claim.work.attempt, reason: "flaky", retry: "true" });
+  assert.equal(store.getWork("c1", "w1")!.status, "open", "retry true reopens the work");
+  await assert.rejects(alice("work-claim", { context: "c1", next: "yes" }), /bad-flag/);
+  store.close();
+});
+
+test("comma-separated lists are trimmed: options 'yes, no' means yes and no, caps 'read, write' means read and write", async () => {
+  const { alice, store } = world();
+  await alice("create", { id: "c1", title: "t" });
+  await alice("decision-request", { context: "c1", id: "d1", question: "q?", options: "yes, no," });
+  assert.deepEqual(store.pending("c1", "human:alice").decisions[0]!.options, ["yes", "no"]);
+  await alice("decide", { context: "c1", decision: "d1", answer: "no" });
+  for (const blank of [",", " ", " , "]) await assert.rejects(alice("decision-request", { context: "c1", id: "d2", question: "q?", options: blank }), /bad-options/, JSON.stringify(blank));
+  await alice("join", { context: "c1", actor: "human:bob", caps: " read , write " });
+  assert.deepEqual(JSON.parse((store.db.prepare("SELECT capabilities FROM members WHERE actor_id='human:bob'").get() as { capabilities: string }).capabilities), ["read", "write"]);
+  store.close();
+});
+
+test("a bad cursor is an error, not an empty answer; a lease has an upper bound", async () => {
+  const { alice, store } = world();
+  await alice("create", { id: "c1", title: "t" });
+  await alice("post", { context: "c1", text: "m" });
+  for (const bad of ["abc", "Infinity", "NaN"]) await assert.rejects(alice("events", { context: "c1", after: bad }), /bad-seq/, bad);
+  assert.equal((await alice("events", { context: "c1", after: "0" })).length, 2);
+  assert.equal((await alice("events", { context: "c1", after: "-5" })).length, 2, "a negative cursor reads from the start");
+  assert.equal((await alice("events", { context: "c1" })).length, 2, "no cursor reads from the start");
+  const { MAX_LEASE_MS } = await import("../src/core/store.ts");
+  await alice("work-request", { context: "c1", id: "w1", to: "human:alice", input: "{}" });
+  for (const bad of [MAX_LEASE_MS + 1, 99_999_999_999_999]) await assert.rejects(alice("work-claim", { context: "c1", id: "w1", "lease-ms": bad }), /bad-lease/, String(bad));
+  const ok = await alice("work-claim", { context: "c1", id: "w1", "lease-ms": MAX_LEASE_MS });
+  assert.ok(ok.work.leaseUntil - Date.now() <= MAX_LEASE_MS, "the longest lease is allowed");
+  store.close();
+});
+
+test("declared skills are bounded: 100 at most, 200 characters each", async () => {
+  const { as, store } = world();
+  const bob = as("agent:bob");
+  await bob("actor", { skills: Array.from({ length: 100 }, (_, i) => `s${i}`).join(",") });
+  await assert.rejects(bob("actor", { skills: Array.from({ length: 101 }, (_, i) => `s${i}`).join(",") }), /bad-skills/);
+  await assert.rejects(bob("actor", { skills: "x".repeat(201) }), /bad-skills/);
+  assert.equal(JSON.parse((store.db.prepare("SELECT skills FROM actors WHERE id='agent:bob'").get() as { skills: string }).skills).length, 100, "the refused calls changed nothing");
+  store.close();
+});
+
+test("leaving a realm with a key that is taken in an inner context works; a real collision is a clean key-conflict and changes nothing", async () => {
+  const { alice, as, store } = world();
+  const bob = as("human:bob");
+  await alice("create", { id: "r1", title: "Realm", kind: "realm" });
+  await alice("join", { context: "r1", actor: "human:bob", caps: "read,write" });
+  await alice("create", { id: "ch1", title: "Channel", kind: "channel", realm: "r1" });
+  await alice("join", { context: "ch1", actor: "human:bob", caps: "read,write" });
+  await alice("post", { context: "ch1", text: "someone used k1 here", key: "k1" });
+  await bob("leave", { context: "r1", key: "k1" }); // used to fail with a raw UNIQUE constraint error
+  const members = (c: string) => (store.db.prepare("SELECT actor_id FROM members WHERE context_id=?").all(c) as Array<{ actor_id: string }>).map((m) => m.actor_id);
+  assert.deepEqual([members("r1"), members("ch1")], [["human:alice"], ["human:alice"]], "bob left the realm and the channel inside it");
+  assert.ok(store.eventsSince("ch1", 0).some((e) => e.type === "member.removed" && e.key === "k1@ch1"));
+
+  await alice("join", { context: "r1", actor: "human:bob", caps: "read,write" });
+  await alice("join", { context: "ch1", actor: "human:bob", caps: "read,write" });
+  await alice("post", { context: "ch1", text: "occupies the derived key", key: "k2@ch1" });
+  await assert.rejects(bob("leave", { context: "r1", key: "k2" }), /^Error: key-conflict/);
+  assert.deepEqual([members("r1").sort(), members("ch1").sort()], [["human:alice", "human:bob"], ["human:alice", "human:bob"]], "the refused leave changed nothing");
+  store.close();
+});

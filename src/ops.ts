@@ -26,7 +26,15 @@ const str = (a: Args, k: string) => {
   if (v !== null && typeof v === "object") throw new Error(`bad-arg: ${k} must be text, not ${Array.isArray(v) ? "a list" : "an object"}`); // String({}) would store "[object Object]"
   return String(v);
 };
-const list = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : v == null || v === "" ? [] : String(v).split(","));
+/** A comma-separated list (or an array): items are trimmed and empty ones dropped, so "yes, no" is ["yes", "no"], not ["yes", " no"]. */
+const list = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : v == null || v === "" ? [] : String(v).split(",")).map((x) => x.trim()).filter((x) => x !== "");
+/** The options of a new decision: yes/no unless given. A list that comes out empty (`--options ","`) is an error, not "any answer". */
+const decisionOptions = (v: unknown): string[] => {
+  if (v == null) return ["yes", "no"];
+  const options = list(v);
+  if (!options.length) throw new Error(`bad-options: a decision needs at least one option (got ${JSON.stringify(String(v).slice(0, 40))})`);
+  return options;
+};
 const json = (v: unknown): unknown => {
   if (typeof v !== "string") return v ?? null;
   try {
@@ -35,7 +43,12 @@ const json = (v: unknown): unknown => {
     return v;
   }
 };
-const flag = (v: unknown) => v === true || v === "true";
+/** A yes/no argument: true, false, "true", "false" or absent. Anything else is an error, not "no": `--retry yes` must not silently mean a final failure. */
+const flag = (v: unknown): boolean => {
+  if (v == null || v === false || v === "false") return false;
+  if (v === true || v === "true") return true;
+  throw new Error(`bad-flag: ${JSON.stringify(String(v).slice(0, 40))} is not true or false`);
+};
 const key = (a: Args) => (a.key == null ? randomUUID() : String(a.key));
 
 export const OPS: Record<string, Op> = {
@@ -215,7 +228,7 @@ export const OPS: Record<string, Op> = {
     mintsId: true,
     description: "Open a decision",
     required: ["context", "question"], optional: ["options", "id"],
-    run: (s, as, a) => s.requestDecision({ id: a.id == null ? `d-${randomUUID().slice(0, 8)}` : str(a, "id"), contextId: str(a, "context"), question: str(a, "question"), options: a.options == null ? ["yes", "no"] : list(a.options), requestedBy: as, decidedBy: null, answer: null, status: "open", createdAt: Date.now(), resolvedAt: null }),
+    run: (s, as, a) => s.requestDecision({ id: a.id == null ? `d-${randomUUID().slice(0, 8)}` : str(a, "id"), contextId: str(a, "context"), question: str(a, "question"), options: decisionOptions(a.options), requestedBy: as, decidedBy: null, answer: null, status: "open", createdAt: Date.now(), resolvedAt: null }),
   },
   "decision-get": {
     description: "Where one decision stands: open or resolved, who decided and what (members may read)",
@@ -230,7 +243,14 @@ export const OPS: Record<string, Op> = {
   presence: {
     description: "Set own presence: active|away|silent, optional echo",
     required: ["state"], optional: ["echo", "key"],
-    run: (s, as, a) => s.setPresence(as, str(a, "state") as "active" | "away" | "silent", a.echo === true || a.echo === "true", a.key == null ? undefined : str(a, "key")),
+    run: (s, as, a) => {
+      const state = str(a, "state");
+      if (state !== "active" && state !== "away" && state !== "silent") throw new Error(`bad-state: ${JSON.stringify(state.slice(0, 40))} is not active, away or silent`);
+      // echo limits what a delegate may do (it never decides): a typo such as "yes" must not silently mean "no echo".
+      let echo: boolean;
+      try { echo = flag(a.echo); } catch { throw new Error(`bad-echo: ${JSON.stringify(String(a.echo).slice(0, 40))} is not true or false`); }
+      return s.setPresence(as, state, echo, a.key == null ? undefined : str(a, "key"));
+    },
   },
 };
 
