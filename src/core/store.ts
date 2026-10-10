@@ -2,8 +2,8 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { dirname } from "node:path";
-import type { Actor, Artifact, Context, Decision, EventType, Id, Membership, PiopleEvent, WorkItem } from "./types.ts";
-import { EVENT_TYPES } from "./types.ts";
+import type { Actor, Artifact, Context, ContextKind, Decision, EventType, Id, Membership, PiopleEvent, WorkItem } from "./types.ts";
+import { CONTEXT_KINDS, EVENT_TYPES } from "./types.ts";
 
 const MIGRATIONS: string[] = [
   `
@@ -84,9 +84,41 @@ CREATE INDEX tokens_actor ON tokens(actor_id);
 ALTER TABLE tokens ADD COLUMN expires_at INTEGER;
 ALTER TABLE tokens ADD COLUMN last_used_at INTEGER;
 `,
+  // Migration 9: realms and channels. A realm is a context; contexts point at their realm and, for cases, a channel.
+  `
+ALTER TABLE contexts ADD COLUMN realm_id TEXT REFERENCES contexts(id);
+ALTER TABLE contexts ADD COLUMN parent_id TEXT REFERENCES contexts(id);
+CREATE INDEX contexts_realm ON contexts(realm_id);
+`,
+  // Migration 10: routers (operator-designated actors that may route submitted messages), the queue of
+  // submissions still waiting for a route (so polling costs the queue, not the whole history), and indexes.
+  `
+CREATE TABLE routers (actor_id TEXT PRIMARY KEY REFERENCES actors(id), created_at INTEGER NOT NULL);
+CREATE TABLE route_queue (ingress TEXT NOT NULL, key TEXT NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY (ingress, key));
+CREATE INDEX route_queue_seq ON route_queue(seq);
+CREATE INDEX events_type ON events(type, seq);
+CREATE INDEX events_submitted ON events(context_id, json_extract(data,'$.submittedKey'));
+`,
 ];
 
-export type InboxSummary = { context: Id; title: string; cursor: number; unread: number; pending: number };
+/** Ingress contexts are named ingress:<actor>; Core alone creates them, so nobody can squat on another actor's. */
+const INGRESS_PREFIX = "ingress:";
+/** Event keys the router writes into an ingress; a submission may not use them. */
+const ROUTER_KEY = /^(resolved|shadowed|unresolved|classified):/;
+/** A routed chain of messages may not exceed this many hops (see submitMessage). */
+export const MAX_HOPS = 5;
+/** One actor may have at most this many submitted messages waiting for a route. */
+export const MAX_PENDING_SUBMISSIONS = 100;
+
+/** A message waiting for a route. `classification` is the latest route.classified recorded for it, if any. */
+export type Submission = { ingress: Id; sender: Id; key: string; seq: number; ts: number; text: string; hops: number; classification: Record<string, unknown> | null };
+/** Where a router sends a submission. Always judged with the SENDER's authority, never the router's. */
+export type RouteChoice = { context: Id; as?: "message" | "work"; skill?: string | null; to?: Id | null; deliver?: boolean };
+
+/** Something an actor may address: a context it can write to, with the capabilities it effectively holds there. */
+export type Target = { id: Id; kind: ContextKind; title: string; realm: Id | null; parent: Id | null; capabilities: string[] };
+
+export type InboxSummary = { context: Id; title: string; kind: ContextKind; realm: Id | null; cursor: number; unread: number; pending: number };
 export type Pending = {
   /** assistance.requested addressed to me with no assistance.answered for its key */
   assistance: Array<{ key: string; from: Id; question: string; seq: number }>;
@@ -200,9 +232,27 @@ export class Store {
     return { seq: r.seq, ts: r.ts, type: r.type as EventType, contextId: r.context_id, actorId: r.actor_id, key: r.key, data: JSON.parse(r.data) };
   }
 
-  private caps(contextId: string, actorId: string): string[] | undefined {
+  private memberCaps(contextId: string, actorId: string): string[] | undefined {
     const m = this.db.prepare(`SELECT capabilities FROM members WHERE context_id=? AND actor_id=?`).get(contextId, actorId) as { capabilities: string } | undefined;
     return m ? (JSON.parse(m.capabilities) as string[]) : undefined;
+  }
+
+  private contextRow(id: Id): { kind: ContextKind; realm_id: Id | null; parent_id: Id | null } | undefined {
+    return this.db.prepare(`SELECT kind, realm_id, parent_id FROM contexts WHERE id=?`).get(id) as { kind: ContextKind; realm_id: Id | null; parent_id: Id | null } | undefined;
+  }
+
+  /**
+   * What an actor effectively holds in a context: its own capabilities there, cut down to what it holds in the
+   * context's realm. Checked at every access, not only when joining, so lowering or losing a realm role takes
+   * effect everywhere inside the realm at once.
+   */
+  private caps(contextId: string, actorId: string): string[] | undefined {
+    const own = this.memberCaps(contextId, actorId);
+    if (!own) return undefined;
+    const realm = this.contextRow(contextId)?.realm_id;
+    if (!realm) return own;
+    const bound = this.memberCaps(realm, actorId);
+    return bound ? own.filter((c) => bound.includes(c)) : undefined;
   }
 
   private mustMember(contextId: string, actorId: string, cap: string): void {
@@ -215,14 +265,41 @@ export class Store {
     this.db.prepare(`INSERT INTO actors(id,kind,name) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name`).run(a.id, a.kind, a.name);
   }
 
+  /** Where a new context sits, validated. A case under a channel lives in that channel's realm. */
+  private placement(c: Context, by: Id): { realm: Id | null; parent: Id | null } {
+    if (!CONTEXT_KINDS.includes(c.kind) || c.kind === "ingress") throw new Error(`bad-kind: ${c.kind} (case, channel or realm)`);
+    if (c.id.startsWith(INGRESS_PREFIX)) throw new Error(`bad-context: ids starting with ${INGRESS_PREFIX} are reserved for ingress contexts`);
+    let realm = c.realmId ?? null;
+    const parent = c.parentId ?? null;
+    if (c.kind === "realm" && (realm || parent)) throw new Error(`bad-context: a realm has no realm or parent`);
+    if (c.kind === "channel" && (!realm || parent)) throw new Error(`bad-context: a channel needs a realm and has no parent`);
+    if (parent) {
+      const p = this.contextRow(parent);
+      if (!p || p.kind !== "channel") throw new Error(`bad-context: parent ${parent} is not a channel`);
+      if (realm && p.realm_id !== realm) throw new Error(`bad-context: channel ${parent} is in another realm`);
+      realm = p.realm_id;
+      this.mustMember(parent, by, "write");
+    }
+    if (realm) {
+      if (this.contextRow(realm)?.kind !== "realm") throw new Error(`bad-context: ${realm} is not a realm`);
+      this.mustMember(realm, by, "write");
+    }
+    return { realm, parent };
+  }
+
   createContext(c: Context, by: Id): PiopleEvent {
+    let where = { realm: null as Id | null, parent: null as Id | null };
     return this.mutate({
       type: "context.created", contextId: c.id, actorId: by, key: `create:${c.id}`,
+      check: () => { where = this.placement(c, by); },
       write: () => {
         this.db.prepare(`INSERT INTO actors(id,kind,name) VALUES(?,?,?) ON CONFLICT(id) DO NOTHING`).run(by, by.startsWith("human:") ? "human" : "agent", by);
-        this.db.prepare(`INSERT INTO contexts(id,kind,title,goal,created_at) VALUES(?,?,?,?,?)`).run(c.id, c.kind, c.title, c.goal, c.createdAt);
-        this.db.prepare(`INSERT INTO members(context_id,actor_id,capabilities,joined_at) VALUES(?,?,?,?)`).run(c.id, by, JSON.stringify(["read", "write", "decide"]), c.createdAt);
-        return { title: c.title };
+        this.db.prepare(`INSERT INTO contexts(id,kind,title,goal,created_at,realm_id,parent_id) VALUES(?,?,?,?,?,?,?)`).run(c.id, c.kind, c.title, c.goal, c.createdAt, where.realm, where.parent);
+        // The creator starts with everything it may hold in the realm (all three when standalone).
+        const bound = where.realm ? this.memberCaps(where.realm, by)! : ["read", "write", "decide"];
+        const caps = ["read", "write", "decide"].filter((x) => bound.includes(x));
+        this.db.prepare(`INSERT INTO members(context_id,actor_id,capabilities,joined_at) VALUES(?,?,?,?)`).run(c.id, by, JSON.stringify(caps), c.createdAt);
+        return { title: c.title, kind: c.kind, realm: where.realm, parent: where.parent };
       },
     });
   }
@@ -238,6 +315,13 @@ export class Store {
         this.mustMember(m.contextId, by, "decide");
         const extra = m.capabilities.filter((c) => !this.caps(m.contextId, by)!.includes(c));
         if (extra.length) throw new Error(`forbidden: ${by} cannot grant ${extra.join(",")}`);
+        const realm = this.contextRow(m.contextId)?.realm_id;
+        if (realm) {
+          const bound = this.memberCaps(realm, m.actorId);
+          if (!bound) throw new Error(`not-in-realm: ${m.actorId} must be a member of ${realm} before joining ${m.contextId}`);
+          const beyond = m.capabilities.filter((c) => !bound.includes(c));
+          if (beyond.length) throw new Error(`forbidden: ${m.actorId} holds only ${bound.join(",") || "nothing"} in ${realm}, cannot be granted ${beyond.join(",")}`);
+        }
       },
       write: () => {
         // The joiner may be known only by id (e.g. from another runtime); register it without renaming.
@@ -533,6 +617,177 @@ export class Store {
     }
   }
 
+  // ---- routing: a submitted message waits in its sender's ingress until a router resolves it -----------------------
+
+  addRouter(actorId: Id): void {
+    if (!/^(human|agent):\S+$/.test(actorId)) throw new Error(`bad-actor: ${actorId} (expected human:<name> or agent:<name>)`);
+    this.tx(() => {
+      this.db.prepare(`INSERT INTO actors(id,kind,name) VALUES(?,?,?) ON CONFLICT(id) DO NOTHING`).run(actorId, actorId.startsWith("human:") ? "human" : "agent", actorId);
+      this.db.prepare(`INSERT INTO routers(actor_id,created_at) VALUES(?,?) ON CONFLICT(actor_id) DO NOTHING`).run(actorId, Date.now());
+    });
+  }
+
+  removeRouter(actorId: Id): number {
+    return Number(this.db.prepare(`DELETE FROM routers WHERE actor_id=?`).run(actorId).changes);
+  }
+
+  listRouters(): Id[] {
+    return (this.db.prepare(`SELECT actor_id FROM routers ORDER BY created_at, rowid`).all() as Array<{ actor_id: string }>).map((r) => r.actor_id);
+  }
+
+  private mustRouter(actorId: Id): void {
+    if (!this.db.prepare(`SELECT 1 FROM routers WHERE actor_id=?`).get(actorId)) throw new Error(`forbidden: ${actorId} is not a router`);
+  }
+
+  private ingressOf(actorId: Id): Id {
+    return `${INGRESS_PREFIX}${actorId}`;
+  }
+
+  private terminalOf(ingress: Id, submittedKey: string): string | undefined {
+    return (this.db.prepare(`SELECT type FROM events WHERE context_id=? AND type IN ('route.resolved','route.shadowed','route.unresolved') AND json_extract(data,'$.submittedKey')=? LIMIT 1`).get(ingress, submittedKey) as { type: string } | undefined)?.type;
+  }
+
+  private submission(ingress: Id, key: string): { actor_id: string; seq: number; ts: number; data: { text: string; hops: number } } | undefined {
+    const r = this.db.prepare(`SELECT actor_id, seq, ts, data FROM events WHERE context_id=? AND key=? AND type='message.submitted'`).get(ingress, key) as { actor_id: string; seq: number; ts: number; data: string } | undefined;
+    return r ? { ...r, data: JSON.parse(r.data) } : undefined;
+  }
+
+  /**
+   * Submit a message without saying where it belongs. It waits in the sender's own ingress for a router.
+   * `after` names the routed message this one reacts to; the chain's hop count grows by one and is refused
+   * past MAX_HOPS, so automatic participants cannot hand a task back and forth forever. (A participant that
+   * leaves `after` out starts a new chain: the limit protects well-behaved chains, the pending cap below
+   * protects against everything else.)
+   */
+  submitMessage(actorId: Id, key: string, text: string, after?: { context: Id; seq: number }): PiopleEvent {
+    const ingress = this.ingressOf(actorId);
+    let hops = 0;
+    return this.tx(() => {
+      const ev = this.submitEvent(ingress, actorId, key, text, after, (h) => { hops = h; }, () => hops);
+      this.db.prepare(`INSERT INTO route_queue(ingress,key,seq) SELECT ?,?,? WHERE NOT EXISTS (SELECT 1 FROM events WHERE context_id=? AND type IN ('route.resolved','route.shadowed','route.unresolved') AND json_extract(data,'$.submittedKey')=?) ON CONFLICT DO NOTHING`).run(ingress, key, ev.seq, ingress, key);
+      return ev;
+    });
+  }
+
+  private submitEvent(ingress: Id, actorId: Id, key: string, text: string, after: { context: Id; seq: number } | undefined, setHops: (h: number) => void, getHops: () => number): PiopleEvent {
+    return this.mutate({
+      type: "message.submitted", contextId: ingress, actorId, key, replayFirst: true,
+      check: () => {
+        if (!text.trim()) throw new Error(`bad-message: empty text`);
+        if (ROUTER_KEY.test(key)) throw new Error(`bad-key: ${key} (keys starting resolved:, shadowed:, unresolved: or classified: are the router's)`);
+        const existing = this.contextRow(ingress);
+        if (existing && existing.kind !== "ingress") throw new Error(`bad-context: ${ingress} exists but is not an ingress`);
+        const waiting = (this.db.prepare(`SELECT COUNT(*) n FROM route_queue WHERE ingress=?`).get(ingress) as { n: number }).n;
+        if (waiting >= MAX_PENDING_SUBMISSIONS) throw new Error(`too-many-pending: ${actorId} has ${waiting} messages waiting for a route`);
+        if (after) {
+          this.mustMember(after.context, actorId, "read");
+          const prev = this.db.prepare(`SELECT data FROM events WHERE context_id=? AND seq=?`).get(after.context, after.seq) as { data: string } | undefined;
+          if (!prev) throw new Error(`bad-after: no event ${after.context}#${after.seq}`);
+          const hops = Number((JSON.parse(prev.data) as { hops?: number }).hops ?? 0) + 1;
+          setHops(hops);
+          if (hops > MAX_HOPS) throw new Error(`hop-limit: this chain has been routed ${MAX_HOPS} times already`);
+        }
+      },
+      write: () => {
+        this.db.prepare(`INSERT INTO contexts(id,kind,title,goal,created_at) VALUES(?,?,?,?,?) ON CONFLICT(id) DO NOTHING`).run(ingress, "ingress", `Ingress of ${actorId}`, "", Date.now());
+        this.db.prepare(`INSERT INTO members(context_id,actor_id,capabilities,joined_at) VALUES(?,?,?,?) ON CONFLICT(context_id,actor_id) DO NOTHING`).run(ingress, actorId, JSON.stringify(["read", "write"]), Date.now());
+        return { text, hops: getHops(), after: after ?? null };
+      },
+    });
+  }
+
+  /** Router only: messages still waiting for a route, oldest first, with their latest classification if one was recorded. */
+  routePending(router: Id, limit = 50): Submission[] {
+    this.mustRouter(router);
+    const n = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), MAX_READ) : 50;
+    const rows = this.db.prepare(`SELECT q.ingress AS context_id, e.actor_id, q.key, q.seq, e.ts, e.data FROM route_queue q JOIN events e ON e.seq=q.seq ORDER BY q.seq LIMIT ?`).all(n) as Array<{ context_id: string; actor_id: string; key: string; seq: number; ts: number; data: string }>;
+    return rows.map((r) => {
+      const d = JSON.parse(r.data) as { text: string; hops: number };
+      const c = this.db.prepare(`SELECT data FROM events WHERE context_id=? AND type='route.classified' AND json_extract(data,'$.submittedKey')=? ORDER BY seq DESC LIMIT 1`).get(r.context_id, r.key) as { data: string } | undefined;
+      return { ingress: r.context_id, sender: r.actor_id, key: r.key, seq: r.seq, ts: r.ts, text: d.text, hops: d.hops, classification: c ? (JSON.parse(c.data) as Record<string, unknown>) : null };
+    });
+  }
+
+  /** Router only: what the sender may address. The classifier is shown nothing else. */
+  routeTargets(router: Id, sender: Id): Target[] {
+    this.mustRouter(router);
+    return this.targets(sender);
+  }
+
+  /** Router only: record the classifier's assessment (audit and later re-testing). Not a decision. */
+  routeClassified(router: Id, ingress: Id, submittedKey: string, data: Record<string, unknown>, tag?: string): PiopleEvent {
+    return this.mutate({
+      type: "route.classified", contextId: ingress, actorId: router, key: `classified:${submittedKey}${tag ? `:${tag}` : ""}`,
+      check: () => {
+        this.mustRouter(router);
+        if (!this.submission(ingress, submittedKey)) throw new Error(`unknown-submission: ${ingress} ${submittedKey}`);
+        if (this.terminalOf(ingress, submittedKey)) throw new Error(`already-routed: ${submittedKey}`);
+      },
+      write: () => ({ ...data, submittedKey }),
+    });
+  }
+
+  /**
+   * Router only: deliver a submitted message to a context, or with deliver=false only record that the route
+   * would have been valid. Delivery happens AS THE SENDER: the sender must be able to write there, so a router
+   * (or the classifier behind it) can never reach a place the sender cannot. Atomic: a refused route records
+   * nothing and the message stays pending. `as: "work"` requests work (by skill or actor) instead of posting.
+   */
+  routeResolve(router: Id, ingress: Id, submittedKey: string, choice: RouteChoice): PiopleEvent {
+    this.mustRouter(router); // authorization first: replayFirst below must not answer anyone else
+    const deliver = choice.deliver !== false;
+    const type = deliver ? "route.resolved" : "route.shadowed";
+    return this.tx(() => {
+      const ev = this.mutate({
+        type, contextId: ingress, actorId: router, key: `${deliver ? "resolved" : "shadowed"}:${submittedKey}`, replayFirst: true,
+        check: () => {
+          if (!this.submission(ingress, submittedKey)) throw new Error(`unknown-submission: ${ingress} ${submittedKey}`);
+          const ended = this.terminalOf(ingress, submittedKey);
+          if (ended && ended !== type) throw new Error(`already-routed: ${submittedKey} ended as ${ended}`);
+        },
+        write: () => {
+          const sub = this.submission(ingress, submittedKey)!;
+          const sender = sub.actor_id;
+          const target = choice.context;
+          const as = choice.as ?? "message";
+          if (as !== "message" && as !== "work") throw new Error(`bad-route: as must be message or work`);
+          if (this.contextRow(target)?.kind === "ingress") throw new Error(`bad-route: ${target} is not a destination`);
+          this.mustMember(target, sender, "write"); // the sender's authority decides, not the router's
+          let deliveredSeq: number | null = null;
+          if (deliver) {
+            const via = { via: "route", hops: sub.data.hops, submitted: { ingress, key: submittedKey } };
+            if (as === "work") {
+              deliveredSeq = this.requestWork(target, sender, { id: `route-${createHash("sha256").update(`${ingress}\0${submittedKey}`).digest("hex").slice(0, 32)}`, to: choice.to ?? null, skill: choice.skill ?? null, input: { text: sub.data.text, ...via } }).seq;
+            } else {
+              deliveredSeq = this.mutate({ type: "message.posted", contextId: target, actorId: sender, key: `route:${ingress}:${submittedKey}`, write: () => ({ text: sub.data.text, ...via }) }).seq;
+            }
+          }
+          return { submittedKey, context: target, as, skill: choice.skill ?? null, to: choice.to ?? null, delivered: deliver, deliveredSeq, hops: sub.data.hops };
+        },
+      });
+      this.db.prepare(`DELETE FROM route_queue WHERE ingress=? AND key=?`).run(ingress, submittedKey);
+      return ev;
+    });
+  }
+
+  /** Router only: the route stayed uncertain or invalid. The message remains in the sender's ingress, visible to the sender. */
+  routeUnresolved(router: Id, ingress: Id, submittedKey: string, reason: string, data: Record<string, unknown> = {}): PiopleEvent {
+    this.mustRouter(router);
+    return this.tx(() => {
+      const ev = this.mutate({
+        type: "route.unresolved", contextId: ingress, actorId: router, key: `unresolved:${submittedKey}`, replayFirst: true,
+        check: () => {
+          if (!this.submission(ingress, submittedKey)) throw new Error(`unknown-submission: ${ingress} ${submittedKey}`);
+          const ended = this.terminalOf(ingress, submittedKey);
+          if (ended && ended !== "route.unresolved") throw new Error(`already-routed: ${submittedKey} ended as ${ended}`);
+        },
+        write: () => ({ ...data, submittedKey, reason }),
+      });
+      this.db.prepare(`DELETE FROM route_queue WHERE ingress=? AND key=?`).run(ingress, submittedKey);
+      return ev;
+    });
+  }
+
   /**
    * Move my read cursor forward (never back, never past the end of the log).
    * Acknowledging is not resolving: pending items are derived from open state, not from the cursor.
@@ -579,13 +834,25 @@ export class Store {
 
   /** What happened while I was away, across every context I can read. */
   inbox(actorId: Id): InboxSummary[] {
-    const ctxs = this.db.prepare(`SELECT c.id, c.title FROM contexts c JOIN members m ON m.context_id=c.id WHERE m.actor_id=? ORDER BY c.created_at, c.id`).all(actorId) as Array<{ id: string; title: string }>;
-    return ctxs.filter((c) => this.caps(c.id, actorId)!.includes("read")).map((c) => {
+    const ctxs = this.db.prepare(`SELECT c.id, c.title, c.kind, c.realm_id FROM contexts c JOIN members m ON m.context_id=c.id WHERE m.actor_id=? ORDER BY c.created_at, c.rowid`).all(actorId) as Array<{ id: string; title: string; kind: ContextKind; realm_id: Id | null }>;
+    return ctxs.filter((c) => this.caps(c.id, actorId)?.includes("read")).map((c) => {
       const cursor = this.cursor(c.id, actorId);
       const unread = (this.db.prepare(`SELECT COUNT(*) n FROM events WHERE context_id=? AND seq>? AND actor_id<>?`).get(c.id, cursor, actorId) as { n: number }).n;
       const p = this.pending(c.id, actorId);
-      return { context: c.id, title: c.title, cursor, unread, pending: p.assistance.length + p.decisions.length + p.work.open.length + p.work.mine.length };
+      return { context: c.id, title: c.title, kind: c.kind, realm: c.realm_id, cursor, unread, pending: p.assistance.length + p.decisions.length + p.work.open.length + p.work.mine.length };
     });
+  }
+
+  /** Everything this actor may address: contexts (realms, channels, cases) it can write to, with what it effectively holds there. */
+  targets(actorId: Id): Target[] {
+    const rows = this.db.prepare(`SELECT c.id, c.kind, c.title, c.realm_id, c.parent_id FROM contexts c JOIN members m ON m.context_id=c.id WHERE m.actor_id=? ORDER BY c.created_at, c.rowid`).all(actorId) as Array<{ id: string; kind: ContextKind; title: string; realm_id: Id | null; parent_id: Id | null }>;
+    const out: Target[] = [];
+    for (const r of rows) {
+      if (r.kind === "ingress") continue; // a place where messages wait for a route, not a destination
+      const caps = this.caps(r.id, actorId);
+      if (caps?.includes("write")) out.push({ id: r.id, kind: r.kind, title: r.title, realm: r.realm_id, parent: r.parent_id, capabilities: caps });
+    }
+    return out;
   }
 
   /** Events after my cursor (all actors, mine included) plus what is pending for me. */
@@ -650,7 +917,7 @@ export class Store {
   }
 
   isMember(contextId: string, actorId: string): boolean {
-    return !!this.db.prepare(`SELECT 1 FROM members WHERE context_id=? AND actor_id=?`).get(contextId, actorId);
+    return this.caps(contextId, actorId) !== undefined;
   }
 
   close() { this.db.close(); }

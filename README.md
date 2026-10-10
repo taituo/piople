@@ -15,7 +15,8 @@ of the first version were removed; the full history up to `c5a5b16` stays in git
 `Actor` (`human:*` / `agent:*`), `Context` (kind=case), `Event` (append-only), `Artifact`.
 Events: `context.created, member.joined, message.posted, observation.recorded,
 observation.promoted, assistance.requested/answered, decision.requested/resolved,
-work.requested/claimed/completed/failed, action.proposed/executed, presence.changed`.
+work.requested/claimed/completed/failed, message.submitted, route.classified/resolved/shadowed/unresolved,
+action.proposed/executed, presence.changed`.
 
 ```
 src/core/      Store (SQLite, migrations) + types — imports only itself + node:*
@@ -24,7 +25,8 @@ src/cli/       one process = one op, JSON on stdout
 src/mcp/       stdio JSON-RPC; same ops as tools piople_<op>
 src/http/      Core over HTTP: POST /v1/ops/<op>, identity = bearer token
 src/hosts/     Harness contract + Host (+ HttpCore client): many participants per process
-src/harnesses/ synthetic.ts (no model) and pi.ts (the only file that imports Pi)
+src/harnesses/ synthetic.ts (no model), router.ts + jev.ts (routing), pi.ts (the only file that imports Pi)
+src/eval/      routing evaluation: labelled messages -> measured thresholds
 test/          core rules in-process; CLI+MCP+Host as real processes; boundary tests
 ```
 
@@ -62,7 +64,8 @@ PIO_CORE_URL=http://core:8899 PIO_TOKEN=pio_... node --no-warnings src/mcp/serve
 
 ## Rules (enforced in Store, so identical for CLI and MCP)
 
-- Membership + capability (`read|write|decide`) checked on every op, including reads.
+- Membership + capability (`read|write|decide`) checked on every op, including reads, and bounded by the
+  context's realm.
 - **Joining is granted, not taken**: the granter needs `decide` and cannot hand
   out capabilities it does not hold. The creator starts with all three.
 - **One write path.** Every mutation runs in a single `BEGIN IMMEDIATE`
@@ -74,6 +77,131 @@ PIO_CORE_URL=http://core:8899 PIO_TOKEN=pio_... node --no-warnings src/mcp/serve
 - `events` is append-only (SQLite triggers).
 - Proposals never execute; a decision binds them. Echo delegates (away human)
   may answer but never decide. Invited experts may answer without membership.
+
+### Realms and channels
+
+A **realm** is the outer boundary of a collaboration area, a **channel** a topic stream inside it, a
+**case** a bounded piece of work. All three are contexts of a different `kind`, so they share events,
+membership, inbox and cursors; nothing else was added to Core.
+
+```sh
+piople --as human:alice create --kind realm   --id realm-infra --title "Infrastructure"
+piople --as human:alice join   --context realm-infra --actor human:bob --caps read,write
+piople --as human:bob   create --kind channel --realm realm-infra --id ch-incidents --title "Incidents"
+piople --as human:bob   create --realm realm-infra --parent ch-incidents --title "Checkout down"   # a case in the channel
+piople --as human:bob   targets    # what I may address: contexts I can write to, with my effective capabilities
+```
+
+- **The realm is the upper bound.** What an actor effectively holds in a context is its own
+  capabilities there cut down to what it holds in the context's realm, checked at every access. Lowering
+  a realm role lowers it everywhere inside the realm at once; a non-member of the realm has nothing in it.
+- **Joining** a context in a realm needs the target to be a member of the realm already, and cannot grant
+  more than the target holds there (`not-in-realm`, `forbidden`).
+- **Realm membership does not confer channel membership.** Joining a channel or case stays explicit.
+- **Creating inside a realm** needs `write` in the realm (and in the parent channel for a case). The
+  creator starts with everything its realm role allows.
+- A case under a channel lives in the channel's realm. Channels need a realm and have no parent. Contexts
+  without a realm behave exactly as before.
+- `inbox` shows each context's `kind` and `realm`.
+
+Not yet: removing members, and routing (choosing the realm/channel/recipient for a message) — see the
+routing plan; Core only provides the addressing (`targets`) and the rules above.
+
+### Routing: saying a message without saying where it goes
+
+```sh
+piople --as human:bob submit --text "production servers keep crashing, please look into it"
+node src/cli/admin.ts --db ./data/p.sqlite add-router --actor agent:router    # the operator designates routers
+```
+
+A submitted message waits in its sender's own **ingress** (a context Core creates on first submit) until a
+**router** resolves it. A router is an ordinary harness (`src/harnesses/router.ts`) that reads the queue
+(`route-pending`), asks a classifier, and calls `route-resolve` or `route-unresolved`. Core holds only the rules:
+
+- **Delivery is as the sender, only where the sender may write.** `route-resolve` posts the message into the
+  chosen context as the sender (or, with `--as work --skill/--to`, requests work as the sender). A router, and
+  the classifier behind it, can never reach a place the sender cannot: the choice is refused and recorded
+  nothing, and the message stays pending. A classifier suggests, Core decides.
+- **The classifier sees only what the sender may address** (`route-targets`), never anything else.
+- **Every decision is an event** in the sender's ingress: `route.classified` (classifier name and version,
+  rule version, mode, choice, confidence, top probabilities, stages), then exactly one of `route.resolved`
+  (delivered), `route.shadowed` (shadow mode: valid, recorded, deliberately not delivered) or
+  `route.unresolved`. `resolved` therefore always means delivered. The sender can read them, so an uncertain
+  message is not lost: it stays visible and the sender can clarify with a new message.
+- **Shadow mode** (`mode: "shadow"`): the same decision is validated and recorded (`route.shadowed`) but
+  nothing is delivered. Start there, compare against what people actually chose, then enforce. Messages
+  submitted during the shadow period stay undelivered: they are not replayed when you switch to enforce.
+- **The queue is a table**: submissions waiting for a route are listed in `route_queue`, so polling costs
+  the queue, not the whole history. Keys starting `resolved:`, `shadowed:`, `unresolved:` or `classified:`
+  belong to the router and are refused on submit; ids starting `ingress:` are reserved for ingress contexts.
+- **No invented thresholds**: `minConfidence` is a required option; derive it from measured results.
+- **Loops are bounded**: `submit --after-context/--after-seq` chains hops (refused past 5); one actor may have
+  at most 100 messages waiting. A participant that omits `--after` starts a new chain, so the cap is the backstop.
+- **Too many targets for one question** (classifiers take a limited number of options) are routed realm
+  first, then within the chosen realm.
+- A classifier outage leaves messages **pending** (retried), it never turns them into unresolved ones; a
+  classification recorded before a crash is reused, not paid for twice.
+- Who may route is the operator's decision (`add-router`), like credentials: it is not an op and not an event.
+
+The `Classifier` interface (`classify({text, targets, stage}) -> {choice, probabilities, confidence, skill?}`)
+has a deterministic `keywordClassifier()` for tests and as an offline baseline, and `jevClassifier()`
+(`src/harnesses/jev.ts`) for Jev.
+
+**Jev** (plain fetch, no SDK; request/response shapes follow the open-source jev-classifier client):
+
+```ts
+const router = new RouterHarness({
+  classifier: jevClassifier({ apiKey, model: "<exact model id>" }),   // no default model: pin it
+  mode: "shadow", minConfidence: /* from measured results */ 0.7, ruleVersion: "r1",
+  external: { allowRealms: ["realm-infra"] },                          // default: none
+  needsHumanAbove: 0.8,                                                // optional; unset = never gate
+});
+```
+
+- One call asks two questions: `target` (`choice` over the offered destinations plus an explicit
+  "none fits" option, so the model is never forced to pick) and `needs_human` (`noul`). Urgency (`score`)
+  is not asked yet: its request shape is not verified.
+- **Privacy: nothing leaves by default.** Destination names are realm-private, so an *external* classifier
+  is offered only targets in `external.allowRealms`; with none configured every message is left
+  `no-permitted-targets` and not a single request is made. Only the message text is sent (no sender, no hop
+  count). Note that the text of a message is sent whenever at least one allowed realm is a candidate.
+- **Pinned model**: `model` is required and recorded with every decision (`classifier.version`). A moving
+  alias would make recorded decisions uninterpretable.
+- **Strict parsing**: a missing/unoffered choice, an incomplete or out-of-range distribution, or a wrong
+  answer type is an error, never a guess. Where the confidence came from (`answer`, `providerMetadata`, or the
+  chosen option's own probability) is recorded in `extras.confidenceSource`.
+- Errors never echo the request, the provider's body or the key; redirects are refused; 30 s timeout.
+  Failures are classified (`ClassifierError`): *transient* (408, 429, 5xx, unreachable) and *config* (401,
+  402, 403, 404) leave every message pending and fail loudly, so a wrong key can never turn messages into
+  unresolved ones; *message* (other 4xx, an unusable answer) is retried `maxAttempts` times (default 3) and then
+  that one message is left unresolved (`classifier-error`) so it cannot hold up the queue.
+- `test/jev.test.ts` runs against a local stand-in endpoint. `test/jev.live.test.ts` calls the real one and is
+  skipped unless `OPENROUTER_API_KEY` (or `JEV_API_KEY`) and `JEV_MODEL` are set.
+
+### Measuring routing before trusting it
+
+```sh
+node src/eval/main.ts                                  # keyword baseline on eval/routing-synthetic.json
+node src/eval/main.ts --dataset my-messages.json --target-precision 0.95 [--json]
+OPENROUTER_API_KEY=... JEV_MODEL=<exact id> node src/eval/main.ts --classifier jev --send-to-external --dataset my-messages.json
+```
+
+A dataset is a small world (contexts, who is a member where) plus labelled messages: `{id, sender, text, expect}`
+where `expect` is the destination a reasonable person would pick among what that sender may address, or `null`
+when the message should stay unrouted. The runner builds the world, submits every message and runs the router in
+**shadow mode** (nothing is delivered), then reports per `minConfidence`: how many messages are routed, how many
+are right, false routes, precision, coverage and the share of right destinations found, plus latency.
+
+- **The threshold is measured, not invented.** The suggestion is the lowest `minConfidence` that reaches your
+  target precision with enough routed messages, with a 95% Wilson lower bound; it says "not yet confident" when
+  the dataset is too small, and "no threshold reaches the target" when none does.
+- A message the sender cannot route anywhere is part of the measurement (`expect: null`); so are senders
+  without access, other languages, and off-topic text that shares words with a channel (see the synthetic set).
+- Evaluating an external classifier shows the dataset's texts and destination names to an outside service: it
+  requires `--send-to-external`.
+- `eval/routing-synthetic.json` was written together with the keyword baseline. It exercises the harness and
+  shows failure modes; **it says nothing about real traffic**. Build a dataset from your own messages.
+- Not measurable offline: how often people re-route by hand, and latency/cost under production load.
 
 ### Inbox: a participant need not be running
 

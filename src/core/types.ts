@@ -9,13 +9,26 @@ export type Actor = {
   name: string;
 };
 
-export type ContextKind = "case";
+/**
+ * A realm is the outer boundary of a collaboration area, a channel a topic stream inside it, a case a
+ * bounded piece of work. All three are contexts: they share events, membership, inbox and cursors. An
+ * ingress is an actor's own context where its not yet routed messages wait; Core creates it, nobody else.
+ */
+export type ContextKind = "case" | "channel" | "realm" | "ingress";
+export const CONTEXT_KINDS: readonly ContextKind[] = ["case", "channel", "realm", "ingress"];
 export type Context = {
   id: Id;
   kind: ContextKind;
   title: string;
   goal: string;
   createdAt: number;
+  /**
+   * The realm (a context of kind realm) this context lives in. Realm membership is the upper bound of
+   * everyone's capabilities here: nobody holds more in a context than in its realm. null = standalone.
+   */
+  realmId?: Id | null;
+  /** For a case: the channel it belongs to (same realm). Grouping only, nothing is inherited from it. */
+  parentId?: Id | null;
 };
 
 export type Membership = {
@@ -43,6 +56,11 @@ export const EVENT_TYPES = [
   "work.claimed",
   "work.completed",
   "work.failed",
+  "message.submitted",
+  "route.classified",
+  "route.resolved",
+  "route.shadowed",
+  "route.unresolved",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 

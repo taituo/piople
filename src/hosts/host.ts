@@ -86,6 +86,17 @@ export class Host {
         await this.core.call(actor, "ack", { context: s.context, seq: rest.at(-1)!.seq });
       }
     }
+    if (e.harness.poll) {
+      steps++; // an attempt, so a failing poll is retried by settle() instead of looking idle
+      try {
+        steps += await e.harness.poll({ actor, run: (op, args = {}) => this.core.call(actor, op, args) as never });
+        steps--; // handled items replace the attempt; an idle poll is not a delivery
+      } catch (error) {
+        e.failures++;
+        stepFailed = true;
+        this.onError({ actor, context: "*", error });
+      }
+    }
     e.recovered = true;
     if (!stepFailed) e.failures = 0;
     return steps;
