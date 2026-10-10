@@ -213,7 +213,7 @@ export function modelSummarizer(o: { baseUrl: string; apiKey?: string; modelId: 
   return {
     name: "model", version: o.modelId,
     async summarize({ level, texts, firstSeq, lastSeq }) {
-      const system = `You compress the history of a shared case between humans and agents. Write at most ${words} words. Keep who said or did what, ids, names, numbers, exact decisions and what is still owed. Never invent anything; say "unknown" rather than guess. Output only the summary.`;
+      const system = `You compress the history of a shared case between humans and agents. Write at most ${words} words. Keep who said or did what, ids, names, numbers, exact decisions and what is still owed. Never invent anything; say "unknown" rather than guess. Never make anything look further along than it was: a decision or plan to do X is not X done, a request is not an answer, and anything still open stays marked as open. Output only the summary.`;
       const user = `${level === 1 ? "Events" : "Summaries"} ${firstSeq}-${lastSeq}:\n${texts.join("\n")}`;
       let res: Response;
       try {

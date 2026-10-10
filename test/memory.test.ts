@@ -134,6 +134,7 @@ test("modelSummarizer: plain chat/completions call, pinned model, strict answer,
   assert.equal(seen[0].auth, "Bearer k-1");
   assert.equal(seen[0].extra, "yes");
   assert.equal(seen[0].body.model, "pinned-1");
+  assert.match(seen[0].body.messages[0].content, /not X done/, "the prompt forbids showing a plan as done");
   assert.match(seen[0].body.messages[1].content, /Events 1-2:\na\nb/);
   await assert.rejects(s.summarize({ level: 1, texts: ["a"], firstSeq: 1, lastSeq: 1 }), /no text/);
   await assert.rejects(s.summarize({ level: 1, texts: ["TOPSECRET"], firstSeq: 1, lastSeq: 1 }), (e: Error) => /HTTP 500/.test(e.message) && !/TOPSECRET|secret-echo|k-1/.test(e.message));
