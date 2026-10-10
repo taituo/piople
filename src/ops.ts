@@ -283,6 +283,8 @@ export function opDef(name: string): Op | undefined {
 
 // Ids are printed in plain text (error messages, terminals): a control character in one (an ESC sequence) would drive the
 // reader's terminal. No id needs one, so none is accepted.
+/** Ids are compared as strings: "ä" typed as one character and as a + combining dots look identical on screen but are two ids. */
+export const isNfc = (v: string) => v === v.normalize("NFC");
 const ACTOR_ID = /^(human|agent):[^\s\p{Cc}]{1,200}$/u;
 const ID_ARGS = ["context", "id", "decision", "artifact", "request", "key", "ingress", "submitted", "holder", "after-context", "parent", "realm"];
 const ACTOR_ARGS = ["actor", "to", "sender"];
@@ -298,8 +300,8 @@ export const ARG_LIMITS: Record<string, number> = { id: 200, title: 2_000, name:
 export function runOp(s: Store, as: string, name: string, a: Args): unknown {
   const op = opDef(name);
   if (!op) throw new Error(`unknown-op: ${name}`);
-  if (!ACTOR_ID.test(as)) throw new Error(`bad-actor: ${JSON.stringify(as)} is not human:<id> or agent:<id>`);
-  for (const k of ACTOR_ARGS) if (a[k] != null && a[k] !== "" && !ACTOR_ID.test(String(a[k]))) throw new Error(`bad-actor: ${k} ${JSON.stringify(String(a[k]).slice(0, 80))} is not human:<id> or agent:<id>`);
+  if (!ACTOR_ID.test(as) || !isNfc(as)) throw new Error(`bad-actor: ${JSON.stringify(as)} is not human:<id> or agent:<id>`);
+  for (const k of ACTOR_ARGS) if (a[k] != null && a[k] !== "" && (!ACTOR_ID.test(String(a[k])) || !isNfc(String(a[k])))) throw new Error(`bad-actor: ${k} ${JSON.stringify(String(a[k]).slice(0, 80))} is not human:<id> or agent:<id>`);
   for (const k of Object.keys(a)) if (tooDeep(a[k])) throw new Error(`bad-arg: ${k} is nested deeper than ${MAX_DEPTH} levels`);
   for (const k of [...op.required, ...(op.optional ?? [])]) {
     const v = a[k];
@@ -309,6 +311,7 @@ export function runOp(s: Store, as: string, name: string, a: Args): unknown {
     if (size > limit) throw new Error(`too-large: ${k} is ${size} characters, the limit is ${limit}`);
   }
   for (const k of ID_ARGS) if (typeof a[k] === "string" && /\p{Cc}/u.test(a[k] as string)) throw new Error(`bad-arg: ${k} contains a control character`);
+  for (const k of ID_ARGS) if (typeof a[k] === "string" && !isNfc(a[k] as string)) throw new Error(`bad-arg: ${k} is not in Unicode normal form NFC (it would look the same as another id)`);
   const missing = op.required.filter((k) => a[k] == null || a[k] === "" || (typeof a[k] === "string" && a[k].trim() === ""));
   if (missing.length) throw new Error(`missing: ${missing.join(",")}`);
   // A key the caller chose (CLI --key, HTTP, MCP) names one request: pin the request to it. A key a host derived itself

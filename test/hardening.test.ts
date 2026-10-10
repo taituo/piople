@@ -231,3 +231,16 @@ test("deeply nested JSON is refused with a plain 400, not a stack overflow (HTTP
   assert.equal(store.getWork("c1", "w65"), undefined, "nothing was stored by the refused calls");
   store.close();
 });
+
+test("an id that is not in Unicode normal form is refused: it would look exactly like the normal one", async () => {
+  const { alice, store, as } = world();
+  const nfc = "äiti", nfd = "äiti";
+  assert.notEqual(nfc, nfd);
+  await alice("create", { id: nfc, title: "t" });
+  await assert.rejects(alice("create", { id: nfd, title: "t" }), /NFC|bad-context/, "a case id");
+  await assert.rejects(alice("join", { context: nfc, actor: `human:${nfd}`, caps: "read,write" }), /bad-actor/, "a member");
+  await assert.rejects(as(`human:${nfd}`)("actor"), /bad-actor/, "an acting identity");
+  assert.throws(() => store.createContext({ id: nfd, kind: "case", title: "t", goal: "", createdAt: 1 }, "human:alice"), /bad-context/);
+  await alice("create", { id: "ääkköset-ok", title: "t" }); // normal Finnish text is untouched
+  store.close();
+});
