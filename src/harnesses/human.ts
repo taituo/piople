@@ -19,10 +19,24 @@ const describe = (e: { seq: number; actorId: string; type: string; data: Record<
   return `${e.seq} ${e.actorId} ${e.type}${body !== "" ? `: ${String(body)}` : ""}`;
 };
 
+/**
+ * Text from other participants is printed to a person's terminal, so it must not be able to drive that terminal:
+ * an ESC sequence can clear the screen, set the title or write the clipboard (OSC 52), and a right-to-left override
+ * can make a line read backwards. Control characters (all but newline and tab), the C1 range and bidi controls are
+ * shown as visible \\x.. / \\u.... escapes instead.
+ */
+export function printable(text: string): string {
+  return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, (c) => {
+    const n = c.charCodeAt(0);
+    return n < 0x100 ? `\\x${n.toString(16).padStart(2, "0")}` : `\\u${n.toString(16)}`;
+  });
+}
+
 export class HumanHarness implements Harness {
   private readonly io: Console;
   constructor(o: { console: Console }) {
-    this.io = o.console;
+    const c = o.console;
+    this.io = { print: (t) => c.print(printable(t)), read: (prompt) => c.read(prompt) };
   }
 
   async step(s: Step): Promise<void> {
@@ -72,13 +86,15 @@ export class HumanHarness implements Harness {
         return `claimed ${r.work.id} attempt ${r.work.attempt}: ${JSON.stringify(r.work.input)}`;
       }
       case "done": {
-        const [id, attempt, ...json] = rest.split(/\s+/);
-        await s.run("work-complete", { id, attempt, result: json.join(" ") });
+        const m = /^(\S+)\s+(\S+)\s*([\s\S]*)$/.exec(rest); // keep the result exactly as typed (spaces inside it matter)
+        if (!m) throw new Error("done <work id> <attempt> <json>");
+        await s.run("work-complete", { id: m[1], attempt: m[2], result: m[3] });
         return "completed";
       }
       case "fail": {
-        const [id, attempt, ...why] = rest.split(/\s+/);
-        await s.run("work-fail", { id, attempt, reason: why.join(" ") });
+        const m = /^(\S+)\s+(\S+)\s*([\s\S]*)$/.exec(rest);
+        if (!m) throw new Error("fail <work id> <attempt> <reason>");
+        await s.run("work-fail", { id: m[1], attempt: m[2], reason: m[3] });
         return "failed";
       }
       default: throw new Error(`unknown command ${cmd} (help)`);
