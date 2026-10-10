@@ -195,3 +195,19 @@ test("leaving a realm with a key that is taken in an inner context works; a real
   assert.deepEqual([members("r1").sort(), members("ch1").sort()], [["human:alice", "human:bob"], ["human:alice", "human:bob"]], "the refused leave changed nothing");
   store.close();
 });
+
+test("ids cannot contain control characters: an ESC sequence in an id would drive the terminal of whoever reads an error message", async () => {
+  const { alice, as, store } = world();
+  const ESC = "\u001b";
+  await alice("create", { id: "c1", title: "t" });
+  await assert.rejects(alice("create", { id: `evil${ESC}[2Jid`, title: "t" }), /bad-arg: id contains a control character/);
+  await assert.rejects(alice("post", { context: `c1${ESC}`, text: "x" }), /bad-arg: context contains a control character/);
+  await assert.rejects(alice("work-request", { context: "c1", id: "w\u0007", to: "human:alice", input: "{}" }), /bad-arg: id/);
+  await assert.rejects(as(`human:eve${ESC}[31m`)("actor"), /bad-actor/);
+  await assert.rejects(alice("join", { context: "c1", actor: `human:eve${ESC}[31m`, caps: "read" }), /bad-actor/);
+  await assert.rejects(alice("post", { context: "c1", text: "x", key: "k\u0000" }), /bad-arg: key/);
+  assert.throws(() => store.createContext({ id: `x${ESC}y`, kind: "case", title: "t", goal: "", createdAt: 1 }, "human:alice"), /bad-context/, "also straight at the Store");
+  await alice("post", { context: "c1", text: `text may still contain ${ESC}: it is printed through printable() where it is shown to a person` });
+  await alice("create", { id: "ääkköset-😀-ok", title: "t" }); // non-ASCII ids stay fine
+  store.close();
+});

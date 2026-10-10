@@ -322,7 +322,7 @@ export class Store {
   /** Where a new context sits, validated. A case under a channel lives in that channel's realm. */
   private placement(c: Context, by: Id): { realm: Id | null; parent: Id | null } {
     if (!CONTEXT_KINDS.includes(c.kind) || c.kind === "ingress") throw new Error(`bad-kind: ${c.kind} (case, channel or realm)`);
-    if (typeof c.id !== "string" || c.id.trim() === "" || c.id.length > 200) throw new Error(`bad-context: an id is 1 to 200 characters and not blank`);
+    if (typeof c.id !== "string" || c.id.trim() === "" || c.id.length > 200 || /\p{Cc}/u.test(c.id)) throw new Error(`bad-context: an id is 1 to 200 characters, not blank and without control characters`);
     if (c.id.startsWith(INGRESS_PREFIX)) throw new Error(`bad-context: ids starting with ${INGRESS_PREFIX} are reserved for ingress contexts`);
     let realm = c.realmId ?? null;
     const parent = c.parentId ?? null;
