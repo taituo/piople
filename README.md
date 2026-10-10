@@ -105,6 +105,41 @@ piople --as human:bob   targets    # what I may address: contexts I can write to
 Not yet: removing members, and routing (choosing the realm/channel/recipient for a message) — see the
 routing plan; Core only provides the addressing (`targets`) and the rules above.
 
+### Routing: saying a message without saying where it goes
+
+```sh
+piople --as human:bob submit --text "production servers keep crashing, please look into it"
+node src/cli/admin.ts --db ./data/p.sqlite add-router --actor agent:router    # the operator designates routers
+```
+
+A submitted message waits in its sender's own **ingress** (a context Core creates on first submit) until a
+**router** resolves it. A router is an ordinary harness (`src/harnesses/router.ts`) that reads the queue
+(`route-pending`), asks a classifier, and calls `route-resolve` or `route-unresolved`. Core holds only the rules:
+
+- **Delivery is as the sender, only where the sender may write.** `route-resolve` posts the message into the
+  chosen context as the sender (or, with `--as work --skill/--to`, requests work as the sender). A router, and
+  the classifier behind it, can never reach a place the sender cannot: the choice is refused and recorded
+  nothing, and the message stays pending. A classifier suggests, Core decides.
+- **The classifier sees only what the sender may address** (`route-targets`), never anything else.
+- **Every decision is an event** in the sender's ingress: `route.classified` (classifier name and version,
+  rule version, mode, choice, confidence, top probabilities, stages), then exactly one of `route.resolved` or
+  `route.unresolved`. The sender can read them, so an uncertain message is not lost: it stays visible and the
+  sender can clarify with a new message.
+- **Shadow mode** (`mode: "shadow"`): the same decision is recorded (`route.resolved` with `delivered: false`)
+  but nothing is delivered. Start there, compare against what people actually chose, then enforce.
+- **No invented thresholds**: `minConfidence` is a required option; derive it from measured results.
+- **Loops are bounded**: `submit --after-context/--after-seq` chains hops (refused past 5); one actor may have
+  at most 100 messages waiting. A participant that omits `--after` starts a new chain, so the cap is the backstop.
+- **Too many targets for one question** (classifiers take a limited number of options) are routed realm
+  first, then within the chosen realm.
+- A classifier outage leaves messages **pending** (retried), it never turns them into unresolved ones; a
+  classification recorded before a crash is reused, not paid for twice.
+- Who may route is the operator's decision (`add-router`), like credentials: it is not an op and not an event.
+
+The `Classifier` interface (`classify({text, targets, stage}) -> {choice, probabilities, confidence, skill?}`)
+has a deterministic `keywordClassifier()` for tests and as an offline baseline. A real classifier (Jev, or a
+local model) plugs in behind the same interface; none is wired yet.
+
 ### Inbox: a participant need not be running
 
 Core keeps a read cursor per `(context, actor)` and derives what is owed from

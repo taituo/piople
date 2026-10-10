@@ -28,5 +28,13 @@ export type Step = {
  */
 export interface Harness {
   step(s: Step): Promise<void>;
+  /**
+   * For participants whose work is not announced in their inbox (a router reads a queue it is not a member of).
+   * Called on every host pass; returns how many items it handled. A throw counts as an attempt and is retried.
+   */
+  poll?(api: PollApi): Promise<number>;
   close?(): Promise<void> | void;
 }
+
+/** What poll() may do: run ops as its own actor. Callers make their own calls idempotent. */
+export type PollApi = { actor: string; run<T = any>(op: string, args?: Args): Promise<T> };
