@@ -27,7 +27,11 @@ if (remoteUrl) {
   const core = new HttpCore(remoteUrl, { [actor]: token });
   call = (op, args) => core.call(actor, op, args);
 } else {
-  store = new Store(process.env.PIO_DATA ?? "./data/piople.sqlite");
+  try {
+    store = new Store(process.env.PIO_DATA ?? "./data/piople.sqlite");
+  } catch (e) {
+    die(e instanceof Error ? e.message : String(e));
+  }
   const local = store;
   call = async (op, args) => runOp(local, actor, op, args);
 }

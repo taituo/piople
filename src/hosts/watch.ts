@@ -30,7 +30,12 @@ if (values.url) {
   if (!process.env.PIO_TOKEN) { process.stderr.write("watch --url needs PIO_TOKEN\n"); process.exit(2); }
   core = new HttpCore(values.url, { [actor]: process.env.PIO_TOKEN });
 } else {
-  store = new Store(values.db ?? process.env.PIO_DATA ?? "./data/piople.sqlite");
+  try {
+    store = new Store(values.db ?? process.env.PIO_DATA ?? "./data/piople.sqlite");
+  } catch (e) {
+    process.stderr.write(`error: ${e instanceof Error ? e.message : String(e)}\n`);
+    process.exit(1);
+  }
   core = new LocalCore(store);
 }
 const host = new Host(core);

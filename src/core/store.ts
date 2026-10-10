@@ -176,10 +176,20 @@ export class Store {
   private depth = 0;
 
   constructor(path: string) {
-    if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
-    this.db = new DatabaseSync(path);
-    this.db.exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;`);
-    this.migrate();
+    // "" would not fail: SQLite takes it for a private temporary database, so every write of a command run with an empty
+    // `--db` or an empty PIO_DATA would succeed and vanish when the process ends.
+    if (typeof path !== "string" || path.trim() === "") throw new Error(`bad-db-path: a database path is required (got ${JSON.stringify(path)})`);
+    let db: DatabaseSync | undefined;
+    try {
+      if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+      db = new DatabaseSync(path);
+      this.db = db;
+      this.db.exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;`);
+      this.migrate();
+    } catch (e) {
+      try { db?.close(); } catch { /* already closed or never opened */ }
+      throw new Error(`cannot-open-database: ${path}: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   private migrate() {

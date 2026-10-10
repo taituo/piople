@@ -27,7 +27,13 @@ if (values["ttl-ms"] !== undefined && cmd !== "issue-token") {
   process.stderr.write("error: --ttl-ms only applies to issue-token\n");
   process.exit(2);
 }
-const store = new Store(values.db ?? process.env.PIO_DATA ?? "./data/piople.sqlite");
+let store: Store;
+try {
+  store = new Store(values.db ?? process.env.PIO_DATA ?? "./data/piople.sqlite");
+} catch (e) {
+  process.stderr.write(`error: ${e instanceof Error ? e.message : String(e)}\n`);
+  process.exit(1);
+}
 try {
   const ttl = values["ttl-ms"] === undefined ? undefined : Number(values["ttl-ms"]);
   const actor = values.actor!;

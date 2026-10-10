@@ -43,7 +43,13 @@ if (!as) {
   process.exit(2);
 }
 
-const store = new Store(head.values.db ?? process.env.PIO_DATA ?? "./data/piople.sqlite");
+let store: Store;
+try {
+  store = new Store(head.values.db ?? process.env.PIO_DATA ?? "./data/piople.sqlite");
+} catch (e) {
+  process.stderr.write(`error: ${e instanceof Error ? e.message : String(e)}\n`);
+  process.exit(1);
+}
 try {
   process.stdout.write(JSON.stringify(runOp(store, as, op, opArgs), null, 2) + "\n");
 } catch (e) {
