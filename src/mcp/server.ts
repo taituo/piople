@@ -97,7 +97,7 @@ process.stdin.on("data", (d: Buffer) => {
       err(null, -32600, "invalid request");
       continue;
     }
-    const answer = (e: unknown) => err(req.id ?? null, -32603, `internal error: ${e instanceof Error ? e.message : String(e)}`);
+    const answer = (e: unknown): void => { err(req.id ?? null, -32603, `internal error: ${e instanceof Error ? e.message : String(e)}`); };
     if (req.method === "tools/call") queue = queue.then(async () => { await handle(req); }).catch(answer);
     else void handle(req).catch(answer);
   }
