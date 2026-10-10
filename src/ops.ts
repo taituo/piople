@@ -35,13 +35,28 @@ const decisionOptions = (v: unknown): string[] => {
   if (!options.length) throw new Error(`bad-options: a decision needs at least one option (got ${JSON.stringify(String(v).slice(0, 40))})`);
   return options;
 };
+/** Deepest nesting an argument may have. Checked iteratively: the recursive code that follows (hashing, size, storing as JSON) overflows the stack at a few thousand levels, which came out of the HTTP server as a 500. */
+export const MAX_DEPTH = 64;
+export function tooDeep(v: unknown): boolean {
+  if (typeof v !== "object" || v === null) return false;
+  const stack: Array<[object, number]> = [[v, 1]];
+  while (stack.length) {
+    const [x, d] = stack.pop()!;
+    if (d > MAX_DEPTH) return true;
+    for (const c of Object.values(x)) if (typeof c === "object" && c !== null) stack.push([c, d + 1]);
+  }
+  return false;
+}
 const json = (v: unknown): unknown => {
   if (typeof v !== "string") return v ?? null;
+  let parsed: unknown;
   try {
-    return JSON.parse(v);
+    parsed = JSON.parse(v);
   } catch {
     return v;
   }
+  if (tooDeep(parsed)) throw new Error(`bad-arg: the JSON is nested deeper than ${MAX_DEPTH} levels`);
+  return parsed;
 };
 /** A yes/no argument: true, false, "true", "false" or absent. Anything else is an error, not "no": `--retry yes` must not silently mean a final failure. */
 const flag = (v: unknown): boolean => {
@@ -285,6 +300,7 @@ export function runOp(s: Store, as: string, name: string, a: Args): unknown {
   if (!op) throw new Error(`unknown-op: ${name}`);
   if (!ACTOR_ID.test(as)) throw new Error(`bad-actor: ${JSON.stringify(as)} is not human:<id> or agent:<id>`);
   for (const k of ACTOR_ARGS) if (a[k] != null && a[k] !== "" && !ACTOR_ID.test(String(a[k]))) throw new Error(`bad-actor: ${k} ${JSON.stringify(String(a[k]).slice(0, 80))} is not human:<id> or agent:<id>`);
+  for (const k of Object.keys(a)) if (tooDeep(a[k])) throw new Error(`bad-arg: ${k} is nested deeper than ${MAX_DEPTH} levels`);
   for (const k of [...op.required, ...(op.optional ?? [])]) {
     const v = a[k];
     if (v == null) continue;

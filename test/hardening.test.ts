@@ -209,5 +209,23 @@ test("ids cannot contain control characters: an ESC sequence in an id would driv
   assert.throws(() => store.createContext({ id: `x${ESC}y`, kind: "case", title: "t", goal: "", createdAt: 1 }, "human:alice"), /bad-context/, "also straight at the Store");
   await alice("post", { context: "c1", text: `text may still contain ${ESC}: it is printed through printable() where it is shown to a person` });
   await alice("create", { id: "ääkköset-😀-ok", title: "t" }); // non-ASCII ids stay fine
+test("deeply nested JSON is refused with a plain 400, not a stack overflow (HTTP 500)", async () => {
+  const { alice, store } = world();
+  await alice("create", { id: "c1", title: "t" });
+  const nested = (depth: number): unknown => { let v: unknown = []; for (let i = 1; i < depth; i++) v = [v]; return v; };
+  const asText = (depth: number) => "[".repeat(depth) + "]".repeat(depth);
+  const { statusFor } = await import("../src/http/server.ts");
+  for (const depth of [65, 5_000, 200_000]) {
+    for (const call of [
+      () => alice("work-request", { context: "c1", id: `w${depth}`, to: "human:alice", input: nested(depth) as never }),
+      () => alice("work-request", { context: "c1", id: `v${depth}`, to: "human:alice", input: asText(depth) }),
+      () => alice("post", { context: "c1", text: "x", key: `k${depth}`, extra: nested(depth) as never }),
+    ]) {
+      await assert.rejects(call(), (e: Error) => /^bad-arg: .*nested deeper than 64 levels/.test(e.message) && statusFor(e.message).status === 400, `depth ${depth}`);
+    }
+  }
+  await alice("work-request", { context: "c1", id: "w-ok", to: "human:alice", input: nested(64) as never }); // the limit itself is allowed
+  await alice("work-request", { context: "c1", id: "w-ok2", to: "human:alice", input: asText(64) });
+  assert.equal(store.getWork("c1", "w65"), undefined, "nothing was stored by the refused calls");
   store.close();
 });
