@@ -285,6 +285,39 @@ host.start();            // or: await host.settle() in tests/scripts
   endpoint (`test/fake-model.ts`). A live model run is deliberately not part of the
   suite and has not been run in this repo's current form.
 
+### Memory for long-lived agents (OptChat)
+
+A Pi agent that lives for weeks cannot carry one ever-growing transcript. With `memory`, `PiHarness` starts each
+delivery in a fresh conversation whose first prompt holds a **bounded view** of the case: the newest events
+verbatim, older ones folded into summaries (chunks of `k`, summaries of summaries above), every line with an id.
+The agent reads what a summary stands for with `ZOOM: <id>` (children, down to the original lines).
+
+```ts
+import { extractiveSummarizer, modelSummarizer } from "./src/harnesses/memory.ts";
+await PiHarness.open({ /* ... */, memory: {
+  summarizer: modelSummarizer({ baseUrl, apiKey, modelId: "<exact id>" }),   // or extractiveSummarizer() offline
+  k: 8, recent: 20, budgetTokens: 1500 } });
+```
+
+- **Derived, never authoritative.** The tree lives beside the harness (`<actor>.memory.sqlite`), is built from the
+  event log (`events`, so the agent's own writes are in it too) and can be rebuilt: the same summariser gives the
+  same tree. Core knows nothing of it.
+- **Obligations and decisions never live only in a summary.** Open asks, decisions and work come from Core's
+  `pending` on every step; decisions already taken or asked are pinned verbatim in the view after their event was
+  folded away.
+- **Bounded.** Over budget the texts shrink evenly, then the most detailed old entries are left out (the broad
+  summaries last, the newest three events never), and the prompt says so.
+- **A summariser is pinned.** `modelSummarizer` takes an exact model id; a memory refuses to open under another
+  summariser (`memory-summarizer-mismatch`). Strict: an empty answer, or one cut off by `max_tokens`, is an error;
+  a reasoning model needs room to think (default 2000 tokens), a small non-reasoning model is the better fit. Extra
+  `headers` are for gateways that want them (opencode Go: `x-opencode-session`).
+- **A down summariser never fails a delivery**: the tree is left as it was, the view just stays longer until the
+  next try (`harness.memoryErrors` counts them).
+- Measured with fakes: after 40 messages the prompt stays within budget, a fact planted deep in the history is
+  absent from the view and found by zooming down, and a decision made long ago is still visible verbatim. How well a
+  *real* model summarises and navigates is not measured here; do it as routing is measured, not assumed.
+- Each delivery is its own small durable Pi conversation; they accumulate in the Pi store (not pruned yet).
+
 Not yet: a continuously-running human harness (a human uses the CLI, which is a
 short-lived participant), environments (tools/filesystem/network per harness), and
 anything over a network — `CoreClient` is the seam for that (phase D).

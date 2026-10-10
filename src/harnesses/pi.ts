@@ -7,6 +7,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Harness as PiRuntime, createRegistry, type Conversation } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { Harness, Step } from "../hosts/types.ts";
+import { CaseMemory, type MemEvent, type Summarizer } from "./memory.ts";
 
 /**
  * A Pi-backed participant. The only file that imports Pi.
@@ -28,9 +29,18 @@ export type PiHarnessOptions = {
   /** Model rounds per delivery: after commands that produce feedback the model gets to react. */
   maxRounds?: number;
   maxTokens?: number;
+  /**
+   * Long-lived agents: instead of one ever-growing transcript per case, each delivery starts a fresh conversation
+   * whose first prompt carries a bounded view of the case's history (recent events verbatim, older ones summarised;
+   * see memory.ts). The agent can read what a summary stands for with `ZOOM: <id>`. Pi keeps one small durable
+   * conversation per delivery; the memory is derived and lives beside it in `<actor>.memory.sqlite`.
+   */
+  memory?: { summarizer: Summarizer; k?: number; recent?: number; budgetTokens?: number };
 };
 
-const PROTOCOL = `You take part in a shared case with humans and other agents. You only act by writing command lines, one per line; anything else you write is ignored. Commands:
+const MEMORY_LINE = `ZOOM: <memory id>      (read the original lines behind a summary in the case memory)
+`;
+const protocol = (memory: boolean) => `You take part in a shared case with humans and other agents. You only act by writing command lines, one per line; anything else you write is ignored. Commands:
 POST: <message to everyone>
 OBSERVE: <finding, with its evidence>
 ASK: <actor id> | <question>
@@ -40,9 +50,9 @@ WORK: <skill> | <json input>      (or WORK: @<actor id> | <json input> to addres
 CLAIM: <work id>
 DONE: <work id> | <attempt> | <json result>
 FAIL: <work id> | <attempt> | <reason>
-Rules: the system tells you what is new and what is owed to you. WORK creates a NEW work item for someone else: never write WORK for work that already appears in the log (it is already requested; the item shown under "Owed to you" is yours to CLAIM, not to re-request). Do not invent facts or results; say what you do not know. Permissions are enforced by the system: if a command is refused you will be told, do not try to get around it. If nothing needs doing, reply NOOP. Keep replies short.`;
+${memory ? MEMORY_LINE : ""}Rules: the system tells you what is new and what is owed to you. WORK creates a NEW work item for someone else: never write WORK for work that already appears in the log (it is already requested; the item shown under "Owed to you" is yours to CLAIM, not to re-request). Do not invent facts or results; say what you do not know. Permissions are enforced by the system: if a command is refused you will be told, do not try to get around it. If nothing needs doing, reply NOOP. Keep replies short.`;
 
-const CMD = /^\s*(POST|OBSERVE|ASK|ANSWER|DECIDE|WORK|CLAIM|DONE|FAIL):\s?(.*)$/;
+const CMD = /^\s*(POST|OBSERVE|ASK|ANSWER|DECIDE|WORK|CLAIM|DONE|FAIL|ZOOM):\s?(.*)$/;
 
 /** Strip model control-token leakage (e.g. <ds_s>) before parsing. */
 export function sanitize(text: string): string {
@@ -98,14 +108,18 @@ export class PiHarness implements Harness {
   private readonly storage: { close(c: never): Promise<void> | void };
   private readonly map: DatabaseSync;
   private readonly model: { provider: string; modelId: string };
+  private readonly memory: CaseMemory | undefined;
+  /** Compactions that failed (the summariser was down); the memory is left as it was and retried next delivery. */
+  memoryErrors = 0;
 
-  private constructor(o: PiHarnessOptions, rt: PiRuntime, storage: PiHarness["storage"], map: DatabaseSync) {
+  private constructor(o: PiHarnessOptions, rt: PiRuntime, storage: PiHarness["storage"], map: DatabaseSync, memory: CaseMemory | undefined) {
     this.o = o;
     this.actor = o.actor;
     this.rt = rt;
     this.storage = storage;
     this.map = map;
     this.model = { provider: "piople", modelId: o.modelId };
+    this.memory = memory;
   }
 
   static async open(o: PiHarnessOptions): Promise<PiHarness> {
@@ -126,7 +140,8 @@ export class PiHarness implements Harness {
       models: createPiModels(o), registry: createRegistry(), settings: { retry: { maxRetries: 1 } },
     } as never, BACKGROUND_CONTEXT);
     rt.resume();
-    return new PiHarness(o, rt, storage as never, map);
+    const memory = o.memory ? CaseMemory.open(o.dir === ":memory:" ? ":memory:" : join(o.dir, `${safe}.memory.sqlite`), o.memory) : undefined;
+    return new PiHarness(o, rt, storage as never, map, memory);
   }
 
   async close(): Promise<void> {
@@ -135,12 +150,22 @@ export class PiHarness implements Harness {
     await this.rt.close(BACKGROUND_CONTEXT);
     await this.storage.close(BACKGROUND_CONTEXT as never);
     this.map.close();
+    this.memory?.close();
   }
 
   async step(s: Step): Promise<void> {
     let prompt = renderStep(s);
-    if (prompt === null) return;
-    const conv = await this.conversation(s.context);
+    if (prompt === null) {
+      await this.remember(s);
+      return;
+    }
+    const mem = this.memory;
+    // With memory every delivery is its own conversation (keyed by the cursor, so a retry reuses it); without, one per case.
+    const conv = await this.conversation(mem ? `${s.context}@${s.cursor}` : s.context);
+    if (mem) {
+      const v = mem.view(s.context, this.o.memory?.budgetTokens);
+      if (v.nodes > 0) prompt = `Case memory (older events are folded into summaries; reply ZOOM: <id> to read the original lines behind one):\n${v.text}\n\n${prompt}`;
+    }
     const base = `${s.actor}@${s.context}#${s.cursor}`;
     for (let round = 0; round < (this.o.maxRounds ?? 3) && prompt !== null; round++) {
       const reply = await this.ask(conv, `${base}.r${round}`, prompt);
@@ -151,6 +176,37 @@ export class PiHarness implements Harness {
       }
       prompt = feedback.length ? `${feedback.join("\n")}\nContinue, or reply NOOP.` : null;
     }
+    await this.remember(s);
+  }
+
+  /**
+   * Bring the memory up to the end of the case's log (own writes included: the host acks past them, so they are
+   * never delivered) and fold what has become old. Never fails the delivery: a summariser that is down only means
+   * the view is a little longer until the next try.
+   */
+  private async remember(s: Step): Promise<void> {
+    const mem = this.memory;
+    if (!mem) return;
+    try {
+      for (;;) {
+        const after = mem.lastSeq(s.context);
+        const evs = await s.run<MemEvent[]>("events", { after, limit: 1000 });
+        mem.ingest(s.context, evs);
+        if (evs.length < 1000) break;
+      }
+      await mem.compact(s.context);
+    } catch {
+      this.memoryErrors++;
+    }
+  }
+
+  private zoom(s: Step, id: string): string {
+    if (!this.memory) return "REFUSED ZOOM: this agent has no case memory";
+    const z = this.memory.zoom(s.context, id);
+    if (!z) return `REFUSED ZOOM: no memory entry ${id} in this case`;
+    const lines = z.children.length ? z.children.map((c) => `[${c.id}] ${c.text}`) : [`[${z.node.id}] ${z.node.text}`];
+    const text = lines.join("\n");
+    return `Zoom ${id} (${z.children.length ? `what the summary stands for, ${lines.length} entries` : "the original line"}):\n${text.length > 6000 ? `${text.slice(0, 6000)}\n…(cut)` : text}`;
   }
 
   /** Execute one command. Returns feedback for the model (a claim's input, or why it was refused). */
@@ -172,6 +228,7 @@ export class PiHarness implements Harness {
           const r = await s.run<{ work: { id: string; attempt: number; input: unknown } }>("work-claim", { id: parts[0] });
           return `Claimed ${r.work.id}, attempt ${r.work.attempt}. Input: ${JSON.stringify(r.work.input)}. Finish with DONE or FAIL using this attempt.`;
         }
+        case "ZOOM": return this.zoom(s, parts[0] ?? "");
         case "DONE": await s.run("work-complete", { id: parts[0], attempt: parts[1], result: parts.slice(2).join(" | ") }); return null;
         case "FAIL": await s.run("work-fail", { id: parts[0], attempt: parts[1], reason: parts.slice(2).join(" | ") }); return null;
       }
@@ -189,7 +246,7 @@ export class PiHarness implements Harness {
     }
     const conv = await this.rt.createConversation({
       ownership: { kind: "ownerless" },
-      agent: { model: this.model, instructions: `${this.o.role}\n\nYou are ${this.actor}.\n\n${PROTOCOL}` },
+      agent: { model: this.model, instructions: `${this.o.role}\n\nYou are ${this.actor}.\n\n${protocol(!!this.memory)}` },
     } as never, BACKGROUND_CONTEXT);
     this.map.prepare(`INSERT INTO convs(context_id,conv_id) VALUES(?,?) ON CONFLICT(context_id) DO UPDATE SET conv_id=excluded.conv_id`).run(contextId, Number(conv.id));
     return conv;
