@@ -608,6 +608,8 @@ export class Store {
   }
 
   promoteObservation(artifactId: Id, by: Id, status: "confirmed" | "refuted"): PiopleEvent {
+    // The op layer passes text through: "banana", "CONFIRMED" and even "hypothesis" (undoing a finding) were accepted.
+    if (status !== "confirmed" && status !== "refuted") throw new Error(`bad-status: ${JSON.stringify(String(status).slice(0, 40))} is not confirmed or refuted`);
     const a = this.db.prepare(`SELECT context_id FROM artifacts WHERE id=?`).get(artifactId) as { context_id: string } | undefined;
     if (!a) throw new Error(`unknown-artifact: ${artifactId}`);
     return this.mutate({

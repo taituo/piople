@@ -93,3 +93,33 @@ test("size limits hold for every caller, not only HTTP: a huge title, id or mess
   assert.deepEqual(statusFor("too-large: text is 5 characters, the limit is 1"), { status: 413, code: "too-large" });
   store.close();
 });
+
+test("promote takes only confirmed or refuted; anything else is refused and the finding keeps its status", async () => {
+  const { alice, store } = world();
+  await alice("create", { id: "c1", title: "t" });
+  await alice("observe", { context: "c1", id: "o1", text: "the pool is empty" });
+  for (const bad of ["banana", "CONFIRMED", "hypothesis", "confirmed "]) await assert.rejects(alice("promote", { artifact: "o1", status: bad }), /bad-status/, bad);
+  const status = () => (store.db.prepare("SELECT status FROM artifacts WHERE id='o1'").get() as { status: string }).status;
+  assert.equal(status(), "hypothesis", "nothing changed");
+  await alice("promote", { artifact: "o1", status: "confirmed" });
+  assert.equal(status(), "confirmed");
+  await alice("promote", { artifact: "o1", status: "refuted" });
+  assert.equal(status(), "refuted", "a finding may still be refuted later");
+  store.close();
+});
+
+test("presence: the state and echo flag are checked; a typo must not silently turn echo off", async () => {
+  const { alice, store } = world();
+  await alice("create", { id: "c1", title: "t" });
+  for (const bad of ["banana", "AWAY", "Active"]) await assert.rejects(alice("presence", { state: bad }), /bad-state/, bad);
+  for (const bad of ["yes", "1", "maybe", 2]) await assert.rejects(alice("presence", { state: "away", echo: bad }), /bad-echo/, String(bad));
+  const row = () => store.db.prepare("SELECT state, echo FROM presence WHERE actor_id='human:alice'").get() as { state: string; echo: number } | undefined;
+  assert.equal(row(), undefined, "refused calls changed nothing");
+  await alice("presence", { state: "away", echo: "true" });
+  assert.deepEqual({ ...row() }, { state: "away", echo: 1 });
+  await alice("presence", { state: "active", echo: false });
+  assert.deepEqual({ ...row() }, { state: "active", echo: 0 });
+  await alice("presence", { state: "silent" }); // echo omitted: off
+  assert.deepEqual({ ...row() }, { state: "silent", echo: 0 });
+  store.close();
+});

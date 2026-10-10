@@ -230,7 +230,13 @@ export const OPS: Record<string, Op> = {
   presence: {
     description: "Set own presence: active|away|silent, optional echo",
     required: ["state"], optional: ["echo", "key"],
-    run: (s, as, a) => s.setPresence(as, str(a, "state") as "active" | "away" | "silent", a.echo === true || a.echo === "true", a.key == null ? undefined : str(a, "key")),
+    run: (s, as, a) => {
+      const state = str(a, "state");
+      if (state !== "active" && state !== "away" && state !== "silent") throw new Error(`bad-state: ${JSON.stringify(state.slice(0, 40))} is not active, away or silent`);
+      // echo limits what a delegate may do (it never decides): a typo such as "yes" must not silently mean "no echo".
+      if (a.echo != null && a.echo !== true && a.echo !== false && a.echo !== "true" && a.echo !== "false") throw new Error(`bad-echo: ${JSON.stringify(String(a.echo).slice(0, 40))} is not true or false`);
+      return s.setPresence(as, state, a.echo === true || a.echo === "true", a.key == null ? undefined : str(a, "key"));
+    },
   },
 };
 
