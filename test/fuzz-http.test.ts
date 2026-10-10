@@ -12,7 +12,7 @@ import { createCoreServer } from "../src/http/server.ts";
  * an invited expert only once). Deterministic (seeded). Found the realm-leave key collision (500).
  */
 test("random stateful HTTP calls: no 500, JSON everywhere, database invariants hold", { timeout: 120_000 }, async () => {
-function rng(seed: number) { let s = seed >>> 0; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 2 ** 32); }
+function rng(seed: number) { let a = seed >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; } // mulberry32: the first draws differ between small seeds (a plain LCG gives nearly the same first value)
 const ACTORS = ["human:a", "human:b", "agent:c", "agent:d", "agent:router"];
 const bad: Record<string, string> = {}; let calls = 0; const ok: Record<string, number> = {}; const hist: Record<string, number> = {};
 for (let seed = 1; seed <= 4; seed++) {

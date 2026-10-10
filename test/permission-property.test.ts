@@ -9,7 +9,7 @@ import { Store } from "../src/core/index.ts";
  * Deterministic (seeded).
  */
 test("reads, writes, targets, inbox and route-recent agree with the effective-capability model", () => {
-function rng(seed: number) { let s = seed >>> 0; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 2 ** 32); }
+function rng(seed: number) { let a = seed >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; } // mulberry32: the first draws differ between small seeds (a plain LCG gives nearly the same first value)
 const seen = new Set<string>(); let checks = 0; const violations: string[] = [];
 const bug = (seed: number, msg: string) => { const k = msg.replace(/[\d]+/g, "N").replace(/human:\w+|ctx-\w+|realm-\w+/g, "X"); if (seen.has(k)) return; seen.add(k); violations.push(`seed ${seed}: ${msg}`); };
 for (let seed = 1; seed <= 80; seed++) {
