@@ -19,10 +19,21 @@ if (!values.as || !/^(human|agent):\S+$/.test(values.as)) {
 const actor = values.as;
 const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: process.stdin.isTTY });
 let closed = false;
-rl.on("close", () => { closed = true; });
+// Lines are queued as they arrive. `rl.question` only receives the line it is waiting for, so lines that came in a burst
+// (a pipe, a script, a pasted block) were dropped after the first.
+const queued: string[] = [];
+const waiting: Array<(line: string | null) => void> = [];
+rl.on("line", (line) => { const w = waiting.shift(); if (w) w(line); else queued.push(line); });
+rl.on("close", () => { closed = true; for (const w of waiting.splice(0)) w(null); });
 const io: Console = {
   print: (t) => console.log(t),
-  read: (prompt) => (closed ? Promise.resolve(null) : new Promise((resolve) => { rl.question(prompt, resolve); rl.once("close", () => resolve(null)); })),
+  read: (prompt) => {
+    rl.setPrompt(prompt);
+    rl.prompt();
+    if (queued.length) return Promise.resolve(queued.shift()!);
+    if (closed) return Promise.resolve(null);
+    return new Promise((resolve) => waiting.push(resolve));
+  },
 };
 let store: Store | undefined;
 let core;
