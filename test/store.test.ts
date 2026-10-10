@@ -81,3 +81,14 @@ test("readEvents needs the read capability, not just membership", () => {
   assert.throws(() => s.readEvents("c1", "agent:stranger", 0), /not-a-member/);
   s.close();
 });
+
+test("an answer needs an ask to answer: a wrong key (such as an event number) is refused, not silently filed", () => {
+  const s = new Store(":memory:");
+  s.createContext({ id: "c1", kind: "case", title: "t", goal: "", createdAt: 1 }, "human:alice");
+  s.join({ contextId: "c1", actorId: "agent:a", capabilities: ["read", "write"], joinedAt: 2 }, "j", "human:alice");
+  s.requestAssistance("c1", "human:alice", "q1", "agent:a", "which cluster?", {});
+  assert.throws(() => s.answerAssistance("c1", "agent:a", "a0", "78", "x", []), /unknown-request: 78/);
+  assert.throws(() => s.answerAssistance("c1", "agent:a", "a0b", "post-key", "x", []), /unknown-request/);
+  assert.equal(s.answerAssistance("c1", "agent:a", "a1", "q1", "prod-eu", []).data.requestKey, "q1");
+  s.close();
+});

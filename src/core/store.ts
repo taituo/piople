@@ -461,6 +461,10 @@ export class Store {
         if (!this.isMember(contextId, actorId) && !this.isInvitedExpert(contextId, actorId)) {
           throw new Error(`not-a-member: ${actorId} not in ${contextId}`);
         }
+        // An answer needs an ask to answer. Without this a wrong key (say, an event number) was accepted and the answer vanished.
+        if (!this.db.prepare(`SELECT 1 FROM events WHERE context_id=? AND key=? AND type='assistance.requested'`).get(contextId, requestKey)) {
+          throw new Error(`unknown-request: ${requestKey} is not an ask in ${contextId}`);
+        }
       },
       write: () => ({ requestKey, answer, evidence }),
     });

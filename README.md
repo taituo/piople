@@ -317,6 +317,13 @@ await PiHarness.open({ /* ... */, memory: {
   absent from the view and found by zooming down, and a decision made long ago is still visible verbatim. How well a
   *real* model summarises and navigates is not measured here; do it as routing is measured, not assumed.
 - Each delivery is its own small durable Pi conversation; they accumulate in the Pi store (not pruned yet).
+- **Measured with real models** (`scripts/live-memory.ts`): four facts and one human decision planted in a 70-message
+  case, asked back one at a time. Agent `deepseek-v4-flash`: no memory 1/5 (only the fact still inside the newest
+  events), offline summariser 5/5, `gpt-4.1-mini` summariser 5/5. Agent `glm-5.3-flash`: 1/5 (rescored, see the
+  script), 4/5, 5/5. In every memory run the agent found the fact by zooming one or two levels down; the model
+  summariser needed about half the model calls of the offline one (9 vs 18) because its summaries keep detail.
+  One run per arm, two agent models, one small synthetic case: a sign that the design works, not a benchmark. The
+  summariser's own tokens are not in these counts.
 
 ### A human as a running participant
 
