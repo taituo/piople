@@ -199,3 +199,17 @@ test("mcp: ping is answered with an empty result, and a tools/call without a nam
   assert.match(by(3).error!.message, /missing tool name/);
   assert.match(by(4).error!.message, /unknown tool: nope/);
 });
+
+test("cli: help that was asked for goes to stdout; a mistake goes to stderr with a failing status", () => {
+  const run = (...args: string[]) => spawnSync(process.execPath, ["--no-warnings", "src/cli/main.ts", ...args], { env: { ...process.env, PIO_DATA: db, PIO_ACTOR: "human:alice" }, encoding: "utf8" });
+  for (const args of [["--help"], ["-h"], ["help"], ["post", "--help"]]) {
+    const r = run(...args);
+    assert.equal(r.status, 0, args.join(" "));
+    assert.match(r.stdout, /^usage: piople/, `${args.join(" ")}: the usage is on stdout`);
+    assert.equal(r.stderr, "");
+  }
+  const bad = run("bogus-op");
+  assert.equal(bad.status, 2);
+  assert.equal(bad.stdout, "", "a mistake prints nothing on stdout");
+  assert.match(bad.stderr, /^usage: piople/);
+});

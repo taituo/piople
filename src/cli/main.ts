@@ -10,12 +10,14 @@ import { OPS, opDef, runOp } from "../ops.ts";
 const argv = process.argv.slice(2);
 const opIdx = argv.findIndex((x, i) => !x.startsWith("--") && (i === 0 || !["--db", "--as"].includes(argv[i - 1]!)));
 const op = opIdx < 0 ? undefined : argv[opIdx];
+// Help that was asked for goes to stdout (so `piople --help | grep post` and `| less` work); a mistake goes to stderr.
+const helpAsked = op === "help" || argv.includes("--help") || argv.includes("-h");
 
-if (!op || op === "help" || !opDef(op)) {
+if (helpAsked || !op || !opDef(op)) {
   const lines = Object.entries(OPS).map(([n, o]) =>
     `  ${n.padEnd(17)} ${[...o.required.map((k) => `--${k} <v>`), ...(o.optional ?? []).map((k) => `[--${k} <v>]`)].join(" ")}\n  ${"".padEnd(17)} ${o.description}`);
-  process.stderr.write(`usage: piople [--db path] [--as actor] <op> [--arg value ...]\n\n${lines.join("\n")}\n`);
-  process.exit(op && op !== "help" ? 2 : 0);
+  (helpAsked ? process.stdout : process.stderr).write(`usage: piople [--db path] [--as actor] <op> [--arg value ...]\n\n${lines.join("\n")}\n`);
+  process.exit(helpAsked || !op ? 0 : 2);
 }
 
 const head = parseArgs({ args: argv.slice(0, opIdx), options: { db: { type: "string" }, as: { type: "string" } }, strict: true });
