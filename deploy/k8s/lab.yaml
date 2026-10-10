@@ -1,0 +1,89 @@
+# The lab: Core in its own namespace, nothing shared with anything else on the cluster.
+# Image is substituted by scripts/k8s-lab.ts (IMAGE).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: piople-lab
+  labels: { app.kubernetes.io/part-of: piople-lab }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: core-data, namespace: piople-lab }
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 1Gi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: core, namespace: piople-lab, labels: { app.kubernetes.io/name: piople-core } }
+spec:
+  replicas: 1                      # SQLite is a single writer by design
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app.kubernetes.io/name: piople-core } }
+  template:
+    metadata: { labels: { app.kubernetes.io/name: piople-core } }
+    spec:
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: core
+          image: IMAGE
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: PIO_DATA, value: /data/p.sqlite }
+            - { name: PIO_PORT, value: "8899" }
+            - { name: PIO_BIND, value: 0.0.0.0 }
+          ports: [{ containerPort: 8899 }]
+          readinessProbe: { httpGet: { path: /v1/health, port: 8899 }, periodSeconds: 2 }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+          resources: { requests: { cpu: 50m, memory: 96Mi }, limits: { cpu: 500m, memory: 384Mi } }
+          volumeMounts: [{ name: data, mountPath: /data }, { name: tmp, mountPath: /tmp }]
+      volumes:
+        - { name: data, persistentVolumeClaim: { claimName: core-data } }
+        - { name: tmp, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: core, namespace: piople-lab }
+spec:
+  selector: { app.kubernetes.io/name: piople-core }
+  ports: [{ port: 8899, targetPort: 8899 }]
+---
+# Everything in the namespace starts denied, both directions.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny, namespace: piople-lab }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-dns, namespace: piople-lab }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } } }]
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+---
+# Workers may reach Core and nothing else (no model endpoint, no internet); only workers may reach Core.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: worker-to-core, namespace: piople-lab }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/name: piople-worker } }
+  policyTypes: [Egress]
+  egress:
+    - to: [{ podSelector: { matchLabels: { app.kubernetes.io/name: piople-core } } }]
+      ports: [{ protocol: TCP, port: 8899 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: core-from-workers, namespace: piople-lab }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/name: piople-core } }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ podSelector: { matchLabels: { app.kubernetes.io/name: piople-worker } } }]
+      ports: [{ protocol: TCP, port: 8899 }]

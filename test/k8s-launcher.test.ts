@@ -132,3 +132,14 @@ test("kubectlRunner: success is created, AlreadyExists is exists, anything else 
   await assert.rejects(kubectlRunner({ kubectl: fake('echo "Error: forbidden" >&2; exit 1') }).create(m), (e: Error) => /forbidden/.test(e.message) && !/TOPSECRET/.test(e.message));
   await assert.rejects(kubectlRunner({ kubectl: join(dir, "missing") }).create(m), /could not be started/);
 });
+
+test("egress gate: the Job gets an init container without the token; without a gate there is none", () => {
+  const plain = jobManifest("piople-lab", profile, { context: "c1", workId: "w1", skill: "lab.echo" }) as any;
+  assert.equal(plain.spec.template.spec.initContainers, undefined);
+  const gated = jobManifest("piople-lab", { ...profile, egressGate: { host: "1.1.1.1", port: 80, deadlineMs: 20000 } }, { context: "c1", workId: "w1", skill: "lab.echo" }) as any;
+  const init = gated.spec.template.spec.initContainers[0];
+  assert.deepEqual(init.command.slice(-3), ["1.1.1.1", "80", "20000"]);
+  assert.equal(init.env, undefined, "the gate holds no credential and no configuration");
+  assert.equal(JSON.stringify(init).includes("PIO_TOKEN"), false);
+  assert.equal(init.securityContext.readOnlyRootFilesystem, true);
+});

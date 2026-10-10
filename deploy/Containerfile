@@ -1,0 +1,9 @@
+# Core, the one-shot worker and the host entries in one image (Node 22 runs the .ts sources directly).
+FROM docker.io/library/node:22-slim
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+COPY src ./src
+ENV NODE_ENV=production
+USER 10001:10001
+CMD ["node", "--no-warnings", "src/http/main.ts"]

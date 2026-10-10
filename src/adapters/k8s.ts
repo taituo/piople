@@ -22,6 +22,13 @@ export type LaunchProfile = {
   resources?: { requests?: Record<string, string>; limits?: Record<string, string> };
   /** Default: node --no-warnings src/hosts/worker.ts */
   command?: string[];
+  /**
+   * Fail closed on egress: an init container (which holds no credential) must see this address REFUSED before the
+   * worker container, which holds the token, may start. Guards against a cluster that does not enforce network
+   * policy and against the moment after a pod is created before its rules are in place. Pick an address the
+   * policy should block, e.g. { host: "1.1.1.1", port: 80 }.
+   */
+  egressGate?: { host: string; port: number; deadlineMs?: number };
 };
 
 export type JobRunner = { create(manifest: Record<string, unknown>): Promise<"created" | "exists"> };
@@ -55,6 +62,12 @@ export function jobManifest(namespace: string, p: LaunchProfile, w: { context: s
         spec: {
           restartPolicy: "Never", automountServiceAccountToken: false,
           securityContext: { runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, seccompProfile: { type: "RuntimeDefault" } },
+          ...(p.egressGate ? { initContainers: [{
+            name: "egress-gate", image: p.image, imagePullPolicy: "IfNotPresent",
+            command: ["node", "--no-warnings", "src/hosts/egress-gate.ts", p.egressGate.host, String(p.egressGate.port), String(p.egressGate.deadlineMs ?? 30_000)],
+            securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } },
+            resources: { requests: { cpu: "10m", memory: "32Mi" }, limits: { cpu: "200m", memory: "128Mi" } },
+          }] } : {}),
           containers: [{
             name: "worker", image: p.image, imagePullPolicy: "IfNotPresent", command: p.command ?? ["node", "--no-warnings", "src/hosts/worker.ts"],
             env: [

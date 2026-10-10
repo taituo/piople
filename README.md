@@ -373,6 +373,43 @@ refused, so it cannot move the cursor; the cursor lives in Core, so the new hold
   using the CLI) behaves as before.
 - The lease is operational state, not authority: it grants nothing and Core's membership rules are unchanged.
 
+## Kubernetes
+
+Core, Host and the harnesses do not change; a cluster is just another place participants run
+(`src/adapters/k8s.ts`, `src/hosts/worker.ts`, `deploy/`).
+
+- **Launcher** (`K8sLauncher`): an ordinary participant, **read-only** in the contexts it watches, that starts a Job
+  for work nobody took within `delayMs`. It sees work through `work-list` (read is enough; it cannot take it) and
+  is the only component with cluster permissions. The Job name is derived from the work id, so Kubernetes refuses a
+  duplicate: a second or restarted launcher cannot start the same work twice. It never sees a credential: the Job
+  refers to a Secret by name, provisioned by the operator. The pod is non-root, read-only root filesystem, no
+  capabilities, no service account, with a deadline and a TTL. Plain `kubectl` behind a `JobRunner` seam.
+- **One-shot worker** (`src/hosts/worker.ts`): claims exactly its work, runs the executor for its skill
+  (`src/hosts/executors.ts`) and completes it. A pod killed mid-work and replaced gets **its own claim back** (same
+  attempt) and finishes once; if the work is already done or taken by another it just exits. Executors get
+  `work:<id>:<attempt>` to pass on as an idempotency key.
+- **Network policy** (`deploy/k8s/lab.yaml`): default-deny in both directions, DNS allowed, workers may reach Core
+  and nothing else, only workers may reach Core.
+- **Egress gate** (`egressGate` in the profile): an init container *without the token* that must see a canary address
+  refused several times in a row before the worker container starts. Measured on k3s (kube-router): a new pod's rules
+  land a fraction of a second after its container starts, and one connection in three test runs got out in that
+  window; the gate closes it, and it **fails closed** where egress is not restricted at all (tested in a namespace with
+  no policies). Note that an established connection stays open when the policy arrives (and Node's `fetch` reuses
+  connections), so measure with fresh ones.
+
+```sh
+node scripts/k8s-lab.ts            # builds the image, runs it all in namespace piople-lab on your cluster, deletes it
+```
+
+The lab (`scripts/k8s-lab.ts`, not part of `npm test`) needs `kubectl`, `podman` and passwordless `sudo k3s ctr`. It
+checks, on a real k3s cluster: one Job per work; the pod killed mid-work and the work finished once by the
+replacement, same attempt, one claim and one completion in the log; the launcher never took the work; the gate
+passed; a worker reaches Core but not the internet, the Kubernetes API, the node, or another namespace; and the gate
+refuses to open in a namespace with no policies. **Not covered:** a cluster other than k3s (kind, a managed one), a
+launcher running inside the cluster (it uses your kubeconfig; an in-cluster one would need a ServiceAccount, a Role
+for Jobs and a REST `JobRunner`), Pi workers (the image carries the Pi packages, but the lab's task is the echo
+executor), Temporal (item 9's second half; the cluster has one, in `ai-workflows`, untouched).
+
 ## Across processes and machines
 
 ```sh
@@ -413,7 +450,7 @@ const host = new Host(core);
 
 ## Not built yet
 
-- **Container-level environments** (network policy, per-pod secrets); the process-level file profile exists.
-- **Kubernetes / Temporal** adapters.
+- **Container-level environments** beyond what the lab shows (per-pod secrets, quotas, non-k3s clusters); the process-level file profile and the network-policy lab exist.
+- **Temporal** adapter (the Kubernetes launcher and worker exist; see above).
 - Push delivery (SSE/long-poll), signature-based identity, a multi-node Core.
 
