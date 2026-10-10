@@ -136,3 +136,15 @@ test("yes/no arguments are true or false; a typo is an error, so `retry yes` can
   await assert.rejects(alice("work-claim", { context: "c1", next: "yes" }), /bad-flag/);
   store.close();
 });
+
+test("comma-separated lists are trimmed: options 'yes, no' means yes and no, caps 'read, write' means read and write", async () => {
+  const { alice, store } = world();
+  await alice("create", { id: "c1", title: "t" });
+  await alice("decision-request", { context: "c1", id: "d1", question: "q?", options: "yes, no," });
+  assert.deepEqual(store.pending("c1", "human:alice").decisions[0]!.options, ["yes", "no"]);
+  await alice("decide", { context: "c1", decision: "d1", answer: "no" });
+  for (const blank of [",", " ", " , "]) await assert.rejects(alice("decision-request", { context: "c1", id: "d2", question: "q?", options: blank }), /bad-options/, JSON.stringify(blank));
+  await alice("join", { context: "c1", actor: "human:bob", caps: " read , write " });
+  assert.deepEqual(JSON.parse((store.db.prepare("SELECT capabilities FROM members WHERE actor_id='human:bob'").get() as { capabilities: string }).capabilities), ["read", "write"]);
+  store.close();
+});

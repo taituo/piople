@@ -26,7 +26,15 @@ const str = (a: Args, k: string) => {
   if (v !== null && typeof v === "object") throw new Error(`bad-arg: ${k} must be text, not ${Array.isArray(v) ? "a list" : "an object"}`); // String({}) would store "[object Object]"
   return String(v);
 };
-const list = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : v == null || v === "" ? [] : String(v).split(","));
+/** A comma-separated list (or an array): items are trimmed and empty ones dropped, so "yes, no" is ["yes", "no"], not ["yes", " no"]. */
+const list = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : v == null || v === "" ? [] : String(v).split(",")).map((x) => x.trim()).filter((x) => x !== "");
+/** The options of a new decision: yes/no unless given. A list that comes out empty (`--options ","`) is an error, not "any answer". */
+const decisionOptions = (v: unknown): string[] => {
+  if (v == null) return ["yes", "no"];
+  const options = list(v);
+  if (!options.length) throw new Error(`bad-options: a decision needs at least one option (got ${JSON.stringify(String(v).slice(0, 40))})`);
+  return options;
+};
 const json = (v: unknown): unknown => {
   if (typeof v !== "string") return v ?? null;
   try {
@@ -220,7 +228,7 @@ export const OPS: Record<string, Op> = {
     mintsId: true,
     description: "Open a decision",
     required: ["context", "question"], optional: ["options", "id"],
-    run: (s, as, a) => s.requestDecision({ id: a.id == null ? `d-${randomUUID().slice(0, 8)}` : str(a, "id"), contextId: str(a, "context"), question: str(a, "question"), options: a.options == null ? ["yes", "no"] : list(a.options), requestedBy: as, decidedBy: null, answer: null, status: "open", createdAt: Date.now(), resolvedAt: null }),
+    run: (s, as, a) => s.requestDecision({ id: a.id == null ? `d-${randomUUID().slice(0, 8)}` : str(a, "id"), contextId: str(a, "context"), question: str(a, "question"), options: decisionOptions(a.options), requestedBy: as, decidedBy: null, answer: null, status: "open", createdAt: Date.now(), resolvedAt: null }),
   },
   "decision-get": {
     description: "Where one decision stands: open or resolved, who decided and what (members may read)",
