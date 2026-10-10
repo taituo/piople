@@ -40,7 +40,7 @@ WORK: <skill> | <json input>      (or WORK: @<actor id> | <json input> to addres
 CLAIM: <work id>
 DONE: <work id> | <attempt> | <json result>
 FAIL: <work id> | <attempt> | <reason>
-Rules: the system tells you what is new and what is owed to you. Do not invent facts or results; say what you do not know. Permissions are enforced by the system: if a command is refused you will be told, do not try to get around it. If nothing needs doing, reply NOOP. Keep replies short.`;
+Rules: the system tells you what is new and what is owed to you. WORK creates a NEW work item for someone else: never write WORK for work that already appears in the log (it is already requested; the item shown under "Owed to you" is yours to CLAIM, not to re-request). Do not invent facts or results; say what you do not know. Permissions are enforced by the system: if a command is refused you will be told, do not try to get around it. If nothing needs doing, reply NOOP. Keep replies short.`;
 
 const CMD = /^\s*(POST|OBSERVE|ASK|ANSWER|DECIDE|WORK|CLAIM|DONE|FAIL):\s?(.*)$/;
 
