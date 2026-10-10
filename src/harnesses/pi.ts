@@ -92,6 +92,7 @@ export class PiHarness implements Harness {
   readonly actor: string;
   /** Tokens spent by this harness since it opened. */
   usage = { calls: 0, input: 0, output: 0 };
+  private closed = false;
   private readonly o: PiHarnessOptions;
   private readonly rt: PiRuntime;
   private readonly storage: { close(c: never): Promise<void> | void };
@@ -129,6 +130,8 @@ export class PiHarness implements Harness {
   }
 
   async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
     await this.rt.close(BACKGROUND_CONTEXT);
     await this.storage.close(BACKGROUND_CONTEXT as never);
     this.map.close();

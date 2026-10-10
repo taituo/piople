@@ -1,11 +1,14 @@
 # piople — protocol core
 
 Multi-agent + multi-user collaboration core, cut down to the protocol and two
-process-level faces: a **CLI** and an **MCP stdio server**. No runtime
-dependencies — Node ≥ 22.19 (`node:sqlite`, `node:test`, native `.ts`).
+process-level faces: a **CLI** and an **MCP stdio server**, plus a **Host**
+that runs many participants (Pi agents, synthetic ones) in one process.
+Core, CLI, MCP, Host and the synthetic harness have no runtime dependencies —
+Node ≥ 22.19 (`node:sqlite`, `node:test`, native `.ts`). Only
+`src/harnesses/pi.ts` needs the Pi packages (optional dependencies).
 
 Agents, model gateway, kubectl tools, executor, HTTP server and runner scripts
-were removed; the full history up to `c5a5b16` stays in git.
+of the first version were removed; the full history up to `c5a5b16` stays in git.
 
 ## Concepts
 
@@ -19,7 +22,9 @@ src/core/      Store (SQLite, migrations) + types — imports only itself + node
 src/ops.ts     the one operation table; identity is fixed by the process, never an argument
 src/cli/       one process = one op, JSON on stdout
 src/mcp/       stdio JSON-RPC; same ops as tools piople_<op>
-test/          core rules in-process; CLI+MCP as real processes on one DB file
+src/hosts/     Harness contract + Host: one process, many participants, each its own actor
+src/harnesses/ synthetic.ts (no model) and pi.ts (the only file that imports Pi)
+test/          core rules in-process; CLI+MCP+Host as real processes; boundary tests
 ```
 
 ## Use
@@ -96,6 +101,46 @@ reopens the work; otherwise `failed` is final.
 Core guarantees one holder and one accepted completion per attempt. It cannot
 undo side effects outside itself, so an executor should pass
 `work:<id>:<attempt>` on as its own idempotency key.
+
+## Hosting participants
+
+A **harness** turns what is new into protocol actions; the **host** only delivers.
+One process can host many harnesses, each its own actor:
+
+```ts
+const host = new Host(new LocalCore(store));
+await host.add({ actor: "agent:fetch", skills: ["web.search"],
+  harness: new SyntheticHarness({ behaviors: [behave.worker((input) => lookup(input))] }) });
+await host.add({ actor: "agent:researcher",
+  harness: await PiHarness.open({ actor: "agent:researcher", dir: "./data/pi", role: "You research.",
+    provider: { baseUrl: "https://…/v1", apiKey }, modelId: "…" }) });
+host.start();            // or: await host.settle() in tests/scripts
+```
+
+- **Delivery is at-least-once.** The host polls each actor's inbox and calls
+  `harness.step({context, events, pending, run})` when others have written (or,
+  once after start, when something is still owed). The cursor moves only after
+  `step` returns, so a crash re-delivers. Calls made through `step.run` get keys
+  derived from `(actor, context, cursor, call number)`, so a retried step replays
+  instead of duplicating.
+- **Membership is never granted by the host.** A `decide`-holder joins actors
+  through Core; a hosted actor that names itself `human:*` gets no more power than
+  its capabilities, and a Pi model's refused command goes back to it as feedback.
+- **A harness need not be running** for its actor to exist: the cursor, the open
+  asks/decisions and any work it holds are in Core. A restarted harness resumes
+  its own claim (no re-claim, no new attempt) and is not re-sent what it saw.
+- **PiHarness** keeps the agent's conversation in Pi (durable, one per case) and a
+  tiny private map + reply memo beside it. Command protocol:
+  `POST OBSERVE ASK ANSWER DECIDE WORK CLAIM DONE FAIL` (else `NOOP`). A failed
+  model call throws (never looks like an empty answer) and is retried with a
+  fresh request.
+- Tests drive the real Pi runtime against a deterministic OpenAI-compatible fake
+  endpoint (`test/fake-model.ts`). A live model run is deliberately not part of the
+  suite and has not been run in this repo's current form.
+
+Not yet: a continuously-running human harness (a human uses the CLI, which is a
+short-lived participant), environments (tools/filesystem/network per harness), and
+anything over a network — `CoreClient` is the seam for that (phase D).
 
 ## Toward distribution (not built)
 
