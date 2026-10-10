@@ -225,7 +225,15 @@ export class Store {
       m.check?.();
       const existing = lookup();
       if (existing) return this.row(existing);
-      const data = m.write?.() ?? {};
+      let data: Record<string, unknown>;
+      try {
+        data = m.write?.() ?? {};
+      } catch (e) {
+        // Reusing an id with a different request must be a clean conflict, not a database error text.
+        const dup = /UNIQUE constraint failed: (\w+)\.(?:\w+, \w+\.)?id\b/.exec(e instanceof Error ? e.message : "");
+        if (dup) throw new Error(`id-in-use: that ${dup[1]!.replace(/s$/, "")} id already exists with different content`);
+        throw e;
+      }
       const info = this.db.prepare(`INSERT INTO events(ts,type,context_id,actor_id,key,data) VALUES(?,?,?,?,?,?)`).run(Date.now(), m.type, m.contextId, m.actorId, m.key, JSON.stringify(data));
       const row = this.db.prepare(`SELECT seq, ts, type, context_id, actor_id, key, data FROM events WHERE seq=?`).get(info.lastInsertRowid) as Row;
       return this.row(row);

@@ -65,3 +65,18 @@ test("op names that exist on every object are not ops", async () => {
   }
   store.close();
 });
+
+test("reusing an id in another context is a clean conflict, not a database error", async () => {
+  const { alice, store } = world();
+  await alice("create", { id: "c1", title: "t" });
+  await alice("create", { id: "c2", title: "t" });
+  await alice("decision-request", { context: "c1", id: "d1", question: "first?" });
+  await assert.rejects(alice("decision-request", { context: "c2", id: "d1", question: "second?" }), /^Error: id-in-use: that decision id already exists/);
+  await alice("observe", { context: "c1", id: "o1", text: "one" });
+  await assert.rejects(alice("observe", { context: "c2", id: "o1", text: "two" }), /id-in-use/);
+  const { statusFor } = await import("../src/http/server.ts");
+  assert.deepEqual(statusFor("id-in-use: that decision id already exists"), { status: 409, code: "conflict" });
+  assert.equal(store.getDecision("c1", "d1")!.status, "open", "the original is untouched");
+  assert.equal(store.getDecision("c2", "d1"), undefined, "nothing was half-written in the other context");
+  store.close();
+});
