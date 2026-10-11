@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { Store } from "../core/index.ts";
 
@@ -29,7 +30,15 @@ if (values["ttl-ms"] !== undefined && cmd !== "issue-token") {
 }
 let store: Store;
 try {
-  store = new Store(values.db ?? process.env.PIO_DATA ?? "./data/piople.sqlite");
+  const dbPath = values.db ?? process.env.PIO_DATA ?? "./data/piople.sqlite";
+  // Only issuing a token and designating a router may start a database. The others look at or undo something: on a mistyped path
+  // they would create an empty database and answer "revoked: 0" with exit 0, and the operator would think the token was gone
+  // while the real one is still valid.
+  if ((cmd === "revoke-tokens" || cmd === "list-tokens" || cmd === "remove-router" || cmd === "list-routers") && !existsSync(dbPath)) {
+    process.stderr.write(`error: no database at ${dbPath} (nothing was created; check --db or PIO_DATA)\n`);
+    process.exit(1);
+  }
+  store = new Store(dbPath);
 } catch (e) {
   process.stderr.write(`error: ${e instanceof Error ? e.message : String(e)}\n`);
   process.exit(1);

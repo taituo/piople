@@ -93,3 +93,24 @@ test("export-main: a mistyped database or an unwritable output is a plain error,
   assert.equal(c.status, 0);
   assert.ok(existsSync(join(dir, "ok", "o.json")));
 });
+
+test("admin: revoking or listing on a mistyped database is an error that creates nothing; issuing a token still starts a database", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { mkdtempSync, existsSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "piople-admin-"));
+  const admin = (db: string, ...a: string[]) => spawnSync(process.execPath, ["--no-warnings", "src/cli/admin.ts", "--db", db, ...a], { encoding: "utf8" });
+  const typo = join(dir, "typo.sqlite");
+  for (const cmd of [["revoke-tokens", "--actor", "agent:fetch"], ["list-tokens", "--actor", "agent:fetch"], ["remove-router", "--actor", "agent:router"], ["list-routers"]]) {
+    const r = admin(typo, ...cmd);
+    assert.equal(r.status, 1, cmd[0]);
+    assert.match(r.stderr, /^error: no database at .*typo\.sqlite \(nothing was created/, cmd[0]);
+    assert.equal(r.stdout, "", `${cmd[0]} printed an answer`);
+  }
+  assert.equal(existsSync(typo), false, "nothing was created");
+  const real = join(dir, "real.sqlite");
+  assert.equal(admin(real, "issue-token", "--actor", "agent:fetch").status, 0, "issuing starts a database");
+  assert.equal(admin(real, "revoke-tokens", "--actor", "agent:fetch").status, 0, "and then revoking works on it");
+  assert.equal(admin(join(dir, "r2.sqlite"), "add-router", "--actor", "agent:router").status, 0, "designating a router may start one too");
+});
