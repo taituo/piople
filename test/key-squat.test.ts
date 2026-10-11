@@ -71,7 +71,7 @@ test("a writer cannot take Core's own predictable keys (claim:, complete:, fail:
   await call("human:alice", "join", { context: "c1", actor: "agent:w", caps: "read,write" });
   await call("human:alice", "join", { context: "c1", actor: "human:eve", caps: "read,write" });
   await call("human:alice", "work-request", { context: "c1", id: "w1", to: "agent:w", input: "{}" });
-  for (const key of ["claim:w1:1", "complete:w1:1", "fail:w1:1", "decision:d9", "work:w2", "create:x", "classified:k", "unresolved:k", "route:i", "presence:p", "promote:a:b", "artifact:a", "proposal:a"]) {
+  for (const key of ["claim:w1:1", "complete:w1:1", "fail:w1:1", "decision:d9", "work:w2", "create:x", "classified:k", "unresolved:k", "resolved:k", "shadowed:k", "route:i", "presence:p", "promote:a:b", "artifact:a", "proposal:a"]) {
     await assert.rejects(call("human:eve", "post", { context: "c1", text: "squat", key }), /bad-arg: key .* starts with a prefix Core uses/, key);
   }
   const claimed = await call("agent:w", "work-claim", { context: "c1", id: "w1" });

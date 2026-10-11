@@ -75,7 +75,13 @@ PIO_CORE_URL=http://core:8899 PIO_TOKEN=pio_... node --no-warnings src/mcp/serve
   for another operation or actor is a `key-conflict`. A key the caller chose itself (`--key`, an HTTP or MCP `key`)
   also names one request: the same key with different content is a `key-conflict` too (a hash of the request is kept
   with the event). Keys a host derives for its own steps, and the deterministic defaults, still replay whatever comes
-  back, because a retried step may legitimately send other content. A failed write leaves no
+  back, because a retried step may legitimately send other content. Keys are unique per case, so some are
+  not free to name: a key that starts with an actor's id and `@` (the form a host derives, `agent:x@c1#0.1`, and
+  the form it mints ids in) is that actor's own, and a key a caller names may not start with a prefix Core uses
+  itself (`claim:`, `complete:`, `fail:`, `work:`, `decision:`, `create:`, `artifact:`, `proposal:`, `presence:`,
+  `promote:`, `classified:`, `resolved:`, `shadowed:`, `unresolved:`, `route:`): otherwise a writer could take
+  `claim:w1:1` before the worker and nobody could claim `w1`. Ids and actors must be in Unicode form NFC and
+  contain no invisible characters (zero-width, direction overrides). A failed write leaves no
   half-done rows. Concurrent processes on one SQLite file queue on the write
   lock (`busy_timeout`) instead of failing.
 - `events` is append-only (SQLite triggers).
@@ -286,6 +292,16 @@ await host.add({ actor: "agent:researcher",
 host.start();            // or: await host.settle() in tests/scripts
 ```
 
+- **Nothing a writer sends can make a read unbounded.** One read of a case returns at most 4 MB of events (the
+  first event always comes; the host acks what it got and the next read continues). The inbox lists at most 50
+  open work items, asks and decisions, or 200,000 characters of them (`moreOpen`, `moreAssistance`,
+  `moreDecisions` say how many were left out), and `work-list` is cut at 4 MB. Text that goes to a model or a
+  person is cut as well: a Pi prompt clips each owed line (4,000) and all of them (40,000), the Jev classifier
+  and the model summariser send at most `maxChars` (4,000) of a message, and the console prints at most 4,000
+  characters of a line, saying how much it left out and how to read it whole.
+- **Nothing waits for ever.** `Host.stop()` waits for a step in flight up to `stopTimeoutMs` (15 s), one Pi
+  round takes at most `runTimeoutMs` (5 min), and `kubectl create` at most `timeoutMs` (60 s); after that they fail
+  with a plain error and are retried.
 - **Delivery is at-least-once.** The host polls each actor's inbox and calls
   `harness.step({context, events, pending, run})` when others have written (or,
   once after start, when something is still owed). The cursor moves only after

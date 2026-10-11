@@ -286,7 +286,7 @@ export function opDef(name: string): Op | undefined {
 /** Ids are compared as strings: "ä" typed as one character and as a + combining dots look identical on screen but are two ids. */
 export const isNfc = (v: string) => v === v.normalize("NFC");
 const ACTOR_ID = /^(human|agent):[^\s\p{Cc}\p{Cf}\p{Z}]{1,200}$/u;
-const RESERVED_KEY = /^(?:artifact|claim|classified|complete|create|decision|fail|presence|promote|proposal|route|unresolved|work):/;
+const RESERVED_KEY = /^(?:artifact|claim|classified|complete|create|decision|fail|presence|promote|proposal|resolved|route|shadowed|unresolved|work):/;
 const ID_ARGS = ["context", "id", "decision", "artifact", "request", "key", "ingress", "submitted", "holder", "after-context", "parent", "realm"];
 const ACTOR_ARGS = ["actor", "to", "sender"];
 
