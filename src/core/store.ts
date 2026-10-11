@@ -407,6 +407,13 @@ export class Store {
       type: "member.joined", contextId: m.contextId, actorId: m.actorId, key,
       check: () => {
         if (!m.capabilities.length) throw new Error(`bad-caps: a membership needs at least one of read, write, decide`);
+        // A name that is not a capability is a typo, not a permission problem: "READ" or "read write" used to come back as
+        // "forbidden: you cannot grant READ", as if the person lacked the right.
+        const unknown = m.capabilities.filter((c) => !["read", "write", "decide"].includes(c));
+        if (unknown.length) {
+          const hint = unknown.map((c) => (["read", "write", "decide"].includes(c.toLowerCase()) ? `${JSON.stringify(c)} (write it in lower case)` : JSON.stringify(c)));
+          throw new Error(`bad-caps: ${hint.join(", ")} is not a capability; the capabilities are read, write and decide, separated by commas`);
+        }
         this.mustMember(m.contextId, by, "decide");
         const extra = m.capabilities.filter((c) => !this.caps(m.contextId, by)!.includes(c));
         if (extra.length) throw new Error(`forbidden: ${by} cannot grant ${extra.join(",")}`);

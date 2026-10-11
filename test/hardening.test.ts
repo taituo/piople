@@ -379,3 +379,16 @@ test("a name that is new must be in Unicode normal form (id and key arguments), 
   await assert.rejects(alice("answer", { context: "c1", request: nfd, answer: "a" }), (e: Error) => !/normal form/.test(e.message));
   store.close();
 });
+
+test("a capability that is misspelt is bad-caps with a hint, not 'forbidden' as if the granter lacked the right", async () => {
+  const { alice, store } = world();
+  await alice("create", { id: "c1", title: "t" });
+  const { statusFor } = await import("../src/http/server.ts");
+  for (const [caps, want] of [["READ,WRITE", /"READ" \(write it in lower case\), "WRITE" \(write it in lower case\) is not a capability/], ["read write", /"read write" is not a capability/], ["reed", /"reed" is not a capability/], ["read,Decide", /"Decide" \(write it in lower case\)/]] as const) {
+    await assert.rejects(alice("join", { context: "c1", actor: "agent:x", caps }), (e: Error) => want.test(e.message) && /^bad-caps:/.test(e.message) && statusFor(e.message).status === 400, caps);
+  }
+  await alice("join", { context: "c1", actor: "agent:x", caps: "read, write" }); // spaces after commas are still fine
+  const agentTargets = await new (await import("../src/hosts/host.ts")).LocalCore(store).call("agent:x", "targets", {}) as Array<{ id: string; capabilities: string[] }>;
+  assert.deepEqual(agentTargets.find((t) => t.id === "c1")?.capabilities, ["read", "write"]);
+  store.close();
+});
