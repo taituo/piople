@@ -205,3 +205,24 @@ test("view stays fast when the summariser has been down and thousands of events 
   assert.match(v.text, /\[e11998\]/, "so are the newest three");
   m.close();
 });
+
+test("modelSummarizer cuts every item for the model, but the memory keeps and ZOOMs the whole text", async () => {
+  let sent = "";
+  const fetchStub = (async (_url: string, init: { body: string }) => { sent = JSON.parse(init.body).messages[1].content; return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: "Summary." } }] }), { status: 200 }); }) as unknown as typeof fetch;
+  const s = modelSummarizer({ baseUrl: "http://x/v1", modelId: "m", fetch: fetchStub });
+  const huge = "word ".repeat(200_000); // one megabyte
+  assert.equal(await s.summarize({ level: 1, texts: [huge, "short one", huge], firstSeq: 1, lastSeq: 3 }), "Summary.");
+  assert.ok(sent.length < 12_000, `the request text was ${sent.length} characters`);
+  assert.match(sent, /\[99\d{4} more characters\]/, "says how much was left out");
+  assert.match(sent, /\nshort one\n/, "short items are untouched");
+  const small = modelSummarizer({ baseUrl: "http://x/v1", modelId: "m", fetch: fetchStub, maxChars: 5 });
+  await small.summarize({ level: 1, texts: ["0123456789"], firstSeq: 1, lastSeq: 1 });
+  assert.match(sent, /01234 … \[5 more characters\]/, "maxChars is adjustable");
+  // what is stored is the whole event
+  const m = CaseMemory.open(":memory:", { summarizer: s, k: 2, recent: 0 });
+  m.ingest("c", [{ seq: 1, actorId: "human:a", type: "message.posted", data: { text: huge } }, { seq: 2, actorId: "human:a", type: "message.posted", data: { text: "second" } }]);
+  await m.compact("c");
+  const zoomed = m.zoom("c", "e1");
+  assert.ok(JSON.stringify(zoomed).length > 900_000, "ZOOM returns the whole event");
+  m.close();
+});

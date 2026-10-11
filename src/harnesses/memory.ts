@@ -232,7 +232,7 @@ export function extractiveSummarizer(o: { perLine?: number; max?: number } = {})
  * gateways that want extra ones (the opencode Go gateway needs `x-opencode-session`). Summarising is a cheap job:
  * prefer a small non-reasoning model.
  */
-export function modelSummarizer(o: { baseUrl: string; apiKey?: string; modelId: string; maxWords?: number; maxTokens?: number; timeoutMs?: number; headers?: Record<string, string>; fetch?: typeof fetch }): Summarizer & { stats: { calls: number; input: number; output: number } } {
+export function modelSummarizer(o: { baseUrl: string; apiKey?: string; modelId: string; maxWords?: number; maxTokens?: number; timeoutMs?: number; maxChars?: number; headers?: Record<string, string>; fetch?: typeof fetch }): Summarizer & { stats: { calls: number; input: number; output: number } } {
   const request = o.fetch ?? fetch;
   const words = o.maxWords ?? 120;
   const stats = { calls: 0, input: 0, output: 0 };
@@ -241,7 +241,10 @@ export function modelSummarizer(o: { baseUrl: string; apiKey?: string; modelId: 
     name: "model", version: o.modelId,
     async summarize({ level, texts, firstSeq, lastSeq }) {
       const system = `You compress the history of a shared case between humans and agents. Write at most ${words} words. Keep who said or did what, ids, names, numbers, exact decisions and what is still owed. Never invent anything; say "unknown" rather than guess. Never make anything look further along than it was: a decision or plan to do X is not X done, a request is not an answer, and anything still open stays marked as open. Output only the summary.`;
-      const user = `${level === 1 ? "Events" : "Summaries"} ${firstSeq}-${lastSeq}:\n${texts.join("\n")}`;
+      // Each item is cut for the model (default 4000 characters): an event may be a megabyte and a chunk is several of them, so
+      // one compaction could be eight megabytes at the model's price. The memory keeps the whole text (ZOOM and FIND read that).
+      const max = Math.max(1, o.maxChars ?? 4000);
+      const user = `${level === 1 ? "Events" : "Summaries"} ${firstSeq}-${lastSeq}:\n${texts.map((t) => (t.length > max ? `${t.slice(0, max)} … [${t.length - max} more characters]` : t)).join("\n")}`;
       let res: Response;
       try {
         res = await request(`${o.baseUrl.replace(/\/$/, "")}/chat/completions`, {
