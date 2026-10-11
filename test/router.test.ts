@@ -255,3 +255,30 @@ test("a malformed classifier answer never routes: NaN, missing, string or out-of
     store.close();
   }
 });
+
+test("two-stage routing: a person needed at the realm stage is not lost when the second stage is sure", async () => {
+  const store = new Store(":memory:");
+  store.createContext(ctx("realm-a", "realm", "Alpha research realm"), "human:alice");
+  store.createContext(ctx("ch-a1", "channel", "alpha experiments", { realmId: "realm-a" }), "human:alice");
+  store.createContext(ctx("ch-a2", "channel", "alpha papers", { realmId: "realm-a" }), "human:alice");
+  store.createContext(ctx("realm-b", "realm", "Beta sales realm"), "human:alice");
+  store.createContext(ctx("ch-b1", "channel", "beta pipeline", { realmId: "realm-b" }), "human:alice");
+  store.createContext(ctx("ch-b2", "channel", "beta customers", { realmId: "realm-b" }), "human:alice");
+  store.addRouter(R);
+  // realm stage: confident, but a person is needed (0.9); targets stage: confident, and says no person is needed (0.0)
+  const scripted: Classifier = {
+    name: "scripted", version: "1",
+    async classify(i) {
+      const choice = i.stage === "realm" ? "realm-b" : "ch-b2";
+      return { choice, probabilities: { [choice]: 1 }, confidence: 0.95, extras: { needsHuman: i.stage === "realm" ? 0.9 : 0.0 } };
+    },
+  };
+  const host = await hostWith(store, new RouterHarness({ classifier: scripted, mode: "enforce", minConfidence: 0.3, ruleVersion: "r1", maxOptions: 3, needsHumanAbove: 0.5 }));
+  store.submitMessage("human:alice", "a", "beta customers call");
+  await host.settle();
+  assert.equal(posted(store, "ch-b2").length, 0, "nothing was delivered: a person was asked for at the first stage");
+  const u = ingress(store, "human:alice").find((e) => e.type === "route.unresolved");
+  assert.equal(u?.data.reason, "needs-human");
+  assert.equal((u!.data as unknown as { needsHuman: number }).needsHuman, 0.9);
+  store.close();
+});

@@ -224,7 +224,10 @@ export class RouterHarness implements Harness {
       if (!inside.length) result = { ...first, choice: null };
       else {
         const second = await ask("targets", inside);
-        result = { ...second, confidence: Math.min(first.confidence, second.confidence) };
+        // The weaker of the two stages decides how sure the route is, and either stage may say a person is needed: the figure the
+        // router checks is the higher one (it used to be the second stage's alone, and the first stage's was dropped).
+        const human = [first.extras?.needsHuman, second.extras?.needsHuman].filter((x): x is number => typeof x === "number");
+        result = { ...second, confidence: Math.min(first.confidence, second.confidence), ...(human.length ? { extras: { ...second.extras, needsHuman: Math.max(...human) } } : {}) };
       }
     }
     await api.run("route-classified", {
