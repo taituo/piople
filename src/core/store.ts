@@ -1186,10 +1186,11 @@ export class Store {
   /** Unchecked read, for internal and test use. Actors go through readEvents. */
   eventsSince(contextId: string, afterSeq: number, limit = 200): PiopleEvent[] {
     limit = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), MAX_READ) : 200;
+    // (Bytes, with CAST: length() of text counts characters by reading all of every row, ten times slower.)
     // A page is also bounded in bytes: a message may be 1 MB and a page 1000 events, so one writer could make every read of
     // the case (the Host polls it all the time) a gigabyte. The first event always comes (a reader must make progress),
     // the rest only while they fit; a reader acks what it got and the next read continues from there.
-    const sizes = this.db.prepare(`SELECT seq, length(data) AS n FROM events WHERE context_id=? AND seq>? ORDER BY seq ASC LIMIT ?`).all(contextId, afterSeq, limit) as Array<{ seq: number; n: number }>;
+    const sizes = this.db.prepare(`SELECT seq, length(CAST(data AS BLOB)) AS n FROM events WHERE context_id=? AND seq>? ORDER BY seq ASC LIMIT ?`).all(contextId, afterSeq, limit) as Array<{ seq: number; n: number }>;
     let total = 0, upTo = 0;
     for (const z of sizes) {
       if (upTo && total + z.n > MAX_READ_BYTES) break;
