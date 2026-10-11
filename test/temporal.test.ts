@@ -99,12 +99,12 @@ test("Activities are idempotent in their key: a retry, a replay or a second call
   const acts = createActivities(new HttpCore(P.url, { "agent:orchestrator": P.tok.orch }), "agent:orchestrator");
   const a = await acts.requestWork({ context: "c1", to: "agent:echo1", input: { n: 1 }, key: "wf:step" });
   const b = await acts.requestWork({ context: "c1", to: "agent:echo1", input: { n: 1 }, key: "wf:step" });
-  assert.deepEqual([a.workId, b.workId], [workIdFor("wf:step"), workIdFor("wf:step")]);
+  assert.deepEqual([a.workId, b.workId], [`agent:orchestrator@${workIdFor("wf:step")}`, `agent:orchestrator@${workIdFor("wf:step")}`], "ids start with the orchestrator, which Core keeps for it");
   assert.equal(P.work().length, 1);
   assert.notEqual(workIdFor("wf:step"), workIdFor("wf:other"));
   const d1 = await acts.requestDecision({ context: "c1", question: "ok?", key: "wf:d" });
   const d2 = await acts.requestDecision({ context: "c1", question: "ok?", key: "wf:d" });
-  assert.deepEqual([d1.decisionId, d2.decisionId], [decisionIdFor("wf:d"), decisionIdFor("wf:d")]);
+  assert.deepEqual([d1.decisionId, d2.decisionId], [`agent:orchestrator@${decisionIdFor("wf:d")}`, `agent:orchestrator@${decisionIdFor("wf:d")}`]);
   assert.equal(P.events("decision.requested").length, 1);
   await P.close();
 });

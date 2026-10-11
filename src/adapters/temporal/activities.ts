@@ -51,9 +51,12 @@ export function createActivities(core: CoreClient, actor: string, o: { pollMs?: 
     }
   };
   const pause = (ms: number) => Context.current().sleep(ms); // rejects when the Activity is cancelled
+  // Ids start with "<orchestrator>@": Core keeps ids of that form for that actor, so nobody who can write in the case and
+  // guesses a workflow's key can create the work or decision first and make the workflow fail with id-in-use.
+  const ownId = (id: string) => `${actor}@${id}`;
   return {
     async requestWork({ context, to, input, key }) {
-      const workId = workIdFor(key);
+      const workId = ownId(workIdFor(key));
       await call("work-request", { context, id: workId, to, input: JSON.stringify(input ?? null) });
       return { workId };
     },
@@ -68,7 +71,7 @@ export function createActivities(core: CoreClient, actor: string, o: { pollMs?: 
       }
     },
     async requestDecision({ context, question, options, key }) {
-      const decisionId = decisionIdFor(key);
+      const decisionId = ownId(decisionIdFor(key));
       await call("decision-request", { context, id: decisionId, question, ...(options ? { options: options.join(",") } : {}) });
       return { decisionId };
     },
@@ -81,7 +84,8 @@ export function createActivities(core: CoreClient, actor: string, o: { pollMs?: 
           if (e.type === "decision.resolved" && e.data.decisionId === decisionId) return { answer: String(e.data.answer ?? "") };
         }
         Context.current().heartbeat({ decisionId, after });
-        if (events.length < 200) await pause(pollMs ?? o.pollMs ?? 1000);
+        // A page is cut at 200 events and also at a number of bytes, so a short page does not mean "caught up": rest only on an empty one.
+        if (!events.length) await pause(pollMs ?? o.pollMs ?? 1000);
       }
     },
   };

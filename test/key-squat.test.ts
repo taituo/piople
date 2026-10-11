@@ -82,3 +82,26 @@ test("a writer cannot take Core's own predictable keys (claim:, complete:, fail:
   await call("human:eve", "post", { context: "c1", text: "ok", key: "my-claim:w1:1" });
   store.close();
 });
+
+test("the ids the Temporal activities derive from a workflow key cannot be taken first by a writer who guesses the key", async () => {
+  const { createActivities, workIdFor, decisionIdFor } = await import("../src/adapters/temporal/activities.ts");
+  const { store, core, call } = setup();
+  await call("human:alice", "create", { id: "c1", title: "t" });
+  await call("agent:orchestrator", "actor").catch(() => {});
+  await call("human:alice", "join", { context: "c1", actor: "agent:orchestrator", caps: "read,write,decide" });
+  await call("human:alice", "join", { context: "c1", actor: "agent:echo", caps: "read,write" });
+  await call("human:alice", "join", { context: "c1", actor: "human:eve", caps: "read,write,decide" });
+  // Eve knows the workflow's key ("order-17:approve") and takes both ids the old way, with the bare hash
+  await call("human:eve", "work-request", { context: "c1", id: workIdFor("order-17:approve"), to: "agent:echo", input: "{}" });
+  await call("human:eve", "decision-request", { context: "c1", id: decisionIdFor("order-17:approve"), question: "taken", options: "a,b" });
+  const acts = createActivities(core, "agent:orchestrator");
+  const w = await acts.requestWork({ context: "c1", to: "agent:echo", input: { n: 1 }, key: "order-17:approve" });
+  const d = await acts.requestDecision({ context: "c1", question: "ok?", key: "order-17:approve" });
+  assert.equal(w.workId, `agent:orchestrator@${workIdFor("order-17:approve")}`);
+  assert.equal(d.decisionId, `agent:orchestrator@${decisionIdFor("order-17:approve")}`);
+  assert.equal((await acts.requestWork({ context: "c1", to: "agent:echo", input: { n: 1 }, key: "order-17:approve" })).workId, w.workId, "still idempotent");
+  // and Eve cannot take the new form
+  await assert.rejects(call("human:eve", "work-request", { context: "c1", id: w.workId, to: "agent:echo", input: "{}" }), /forbidden/);
+  await assert.rejects(call("human:eve", "decision-request", { context: "c1", id: d.decisionId, question: "x", options: "a,b" }), /forbidden/);
+  store.close();
+});
