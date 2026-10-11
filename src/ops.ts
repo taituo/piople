@@ -109,7 +109,7 @@ export const OPS: Record<string, Op> = {
     run: (s, as, a) => s.removeMember(str(a, "context"), str(a, "actor"), key(a), as),
   },
   events: {
-    description: "Read context events after seq (members only)",
+    description: "Read context events after seq (members only). A page ends at --limit events or about 4 MB, so a short page is not the end: read on after the last seq until a page is empty",
     required: ["context"], optional: ["after", "limit"],
     run: (s, as, a) => {
       return s.readEvents(str(a, "context"), as, Number(a.after ?? 0), Number(a.limit ?? 200));

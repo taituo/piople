@@ -1183,7 +1183,11 @@ export class Store {
     return Number(this.db.prepare(`UPDATE tokens SET revoked_at=? WHERE actor_id=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)`).run(now, actorId, now).changes);
   }
 
-  /** Unchecked read, for internal and test use. Actors go through readEvents. */
+  /**
+   * Unchecked read, for internal and test use. Actors go through readEvents.
+   * A page ends at `limit` events or MAX_READ_BYTES of event data, whichever comes first (the first event always comes), so a
+   * page shorter than `limit` does not mean the end of the log: read on from the last seq you got until a page is empty.
+   */
   eventsSince(contextId: string, afterSeq: number, limit = 200): PiopleEvent[] {
     limit = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), MAX_READ) : 200;
     // (Bytes, with CAST: length() of text counts characters by reading all of every row, ten times slower.)
