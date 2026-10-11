@@ -145,3 +145,28 @@ test("memory: the agent can FIND an exact line in the whole history, and a bare 
   await model.close();
   store.close();
 });
+
+test("memory: it catches up with the whole log in one delivery even when the byte limit of a read cuts the pages short", async () => {
+  const { CaseMemory } = await import("../src/harnesses/memory.ts");
+  const dir = mkdtempSync(join(tmpdir(), "piople-memcatch-"));
+  const store = new Store(":memory:");
+  const core = new LocalCore(store);
+  const alice = (op: string, a: Record<string, unknown> = {}) => core.call("human:alice", op, a) as Promise<any>;
+  const model = await fakeModel(() => "NOOP");
+  const host = new Host(core);
+  try {
+    await alice("create", { id: "c1", title: "t" });
+    await alice("join", { context: "c1", actor: "agent:pi", caps: "read,write" });
+    await host.add({ actor: "agent:pi", harness: await PiHarness.open(opts(model.baseUrl, dir, { summarizer: extractiveSummarizer(), k: 4, recent: 5 })) });
+    const big = "y".repeat(990_000);
+    for (let i = 0; i < 9; i++) await alice("post", { context: "c1", text: `${i}:${big}`, key: `big${i}` }); // 9 MB: one read returns about four of them
+    await host.tick(); // ONE delivery
+    const last = (store as unknown as { db: { prepare(s: string): { get(): { m: number } } } }).db.prepare("SELECT MAX(seq) m FROM events").get().m;
+    await host.close();
+    const mem = CaseMemory.open(join(dir, "agent_pi.memory.sqlite"), { summarizer: extractiveSummarizer(), k: 4, recent: 5 });
+    try { assert.equal(mem.lastSeq("c1"), last, "after one delivery the memory holds the log to its end, not only the first page"); } finally { mem.close(); }
+  } finally {
+    await model.close();
+    store.close();
+  }
+});

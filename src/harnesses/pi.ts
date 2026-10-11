@@ -330,7 +330,7 @@ export class PiHarness implements Harness {
         const after = mem.lastSeq(s.context);
         const evs = await s.run<MemEvent[]>("events", { after, limit: 1000 });
         mem.ingest(s.context, evs);
-        if (evs.length < 1000) break;
+        if (!evs.length) break; // not "fewer than 1000": a page is also cut at a number of bytes, so a short page is not the end
       }
       await mem.compact(s.context);
     } catch {
