@@ -229,3 +229,19 @@ test("work made by a route cannot be blocked by someone who takes its id first",
   assert.equal((s.getWork("ch-incidents", old)!.input as string), "blocked", "and Eve's work under the old id is just her own work");
   s.close();
 });
+
+test("a sender who has never been seen before can submit (no raw database error), and one with the longest actor id can read their own ingress", async () => {
+  const { LocalCore } = await import("../src/hosts/host.ts");
+  const s = world();
+  const core = new LocalCore(s);
+  const call = (a: string, op: string, x: Record<string, unknown> = {}) => core.call(a, op, x) as Promise<any>;
+  const newcomer = await call("human:newcomer", "submit", { text: "hello, I am new" });
+  assert.equal(newcomer.type, "message.submitted");
+  const long = `human:${"b".repeat(194)}`; // an actor id of 200 characters
+  await call(long, "submit", { text: "hello from a long name" });
+  const ingress = `ingress:${long}`;
+  assert.equal(ingress.length, 208);
+  assert.ok((await call(long, "events", { context: ingress })).length >= 1, "reads its own ingress");
+  assert.ok((await call(long, "inbox", { context: ingress })).events.length >= 1);
+  s.close();
+});

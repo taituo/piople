@@ -299,7 +299,8 @@ const ACTOR_ARGS = ["actor", "to", "sender"];
  * classifier. Generous on purpose; free text and JSON payloads may be large, names may not.
  */
 export const MAX_ARG_CHARS = 1_000_000;
-export const ARG_LIMITS: Record<string, number> = { id: 200, title: 2_000, name: 500, skill: 200, goal: 20_000, question: 20_000, reason: 20_000, key: 500, context: 200, decision: 200, answer: 20_000 };
+// context is 210: the ingress of an actor is "ingress:" (8) and the actor id (up to 200), and a sender must be able to read its own
+export const ARG_LIMITS: Record<string, number> = { id: 200, title: 2_000, name: 500, skill: 200, goal: 20_000, question: 20_000, reason: 20_000, key: 500, context: 210, decision: 200, answer: 20_000 };
 
 export function runOp(s: Store, as: string, name: string, a: Args): unknown {
   const op = opDef(name);

@@ -941,6 +941,8 @@ export class Store {
         }
       },
       write: () => {
+        // The sender may be new here (create, join and issueToken make the actor row too); without it the membership below is a raw foreign-key error.
+        this.db.prepare(`INSERT INTO actors(id,kind,name) VALUES(?,?,?) ON CONFLICT(id) DO NOTHING`).run(actorId, actorId.startsWith("human:") ? "human" : "agent", actorId);
         this.db.prepare(`INSERT INTO contexts(id,kind,title,goal,created_at) VALUES(?,?,?,?,?) ON CONFLICT(id) DO NOTHING`).run(ingress, "ingress", `Ingress of ${actorId}`, "", Date.now());
         this.db.prepare(`INSERT INTO members(context_id,actor_id,capabilities,joined_at) VALUES(?,?,?,?) ON CONFLICT(context_id,actor_id) DO NOTHING`).run(ingress, actorId, JSON.stringify(["read", "write"]), Date.now());
         return { text, hops: getHops(), after: after ?? null };
