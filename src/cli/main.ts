@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { Store } from "../core/index.ts";
 import { OPS, opDef, runOp } from "../ops.ts";
@@ -45,9 +46,17 @@ if (!as) {
   process.exit(2);
 }
 
+/** Operations that only look. On a mistyped database they would create an empty one and answer with an empty list. */
+const READERS = new Set(["targets", "events", "inbox", "work-list", "decision-get", "route-pending", "route-targets", "route-recent"]);
+
 let store: Store;
 try {
-  store = new Store(head.values.db ?? process.env.PIO_DATA ?? "./data/piople.sqlite");
+  const dbPath = head.values.db ?? process.env.PIO_DATA ?? "./data/piople.sqlite";
+  if (READERS.has(op) && !existsSync(dbPath)) {
+    process.stderr.write(`error: no database at ${dbPath} (nothing was created; check --db or PIO_DATA)\n`);
+    process.exit(1);
+  }
+  store = new Store(dbPath);
 } catch (e) {
   process.stderr.write(`error: ${e instanceof Error ? e.message : String(e)}\n`);
   process.exit(1);

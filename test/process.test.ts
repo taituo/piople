@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -212,4 +212,20 @@ test("cli: help that was asked for goes to stdout; a mistake goes to stderr with
   assert.equal(bad.status, 2);
   assert.equal(bad.stdout, "", "a mistake prints nothing on stdout");
   assert.match(bad.stderr, /^usage: piople/);
+});
+
+test("cli: an operation that only reads does not create a database on a mistyped path; one that writes still starts it", () => {
+  const dir = mkdtempSync(join(tmpdir(), "piople-readers-"));
+  const typo = join(dir, "typo.sqlite");
+  const run = (dbPath: string, ...args: string[]) => spawnSync(process.execPath, ["--no-warnings", "src/cli/main.ts", "--db", dbPath, "--as", "human:alice", ...args], { encoding: "utf8" });
+  for (const args of [["inbox"], ["events", "--context", "c1"], ["targets"], ["work-list"], ["decision-get", "--id", "d1"]]) {
+    const r = run(typo, ...args);
+    assert.equal(r.status, 1, args[0]);
+    assert.match(r.stderr, /^error: no database at .*typo\.sqlite \(nothing was created/, args[0]);
+    assert.equal(r.stdout, "", args[0]);
+  }
+  assert.equal(existsSync(typo), false, "nothing was created");
+  const real = join(dir, "real.sqlite");
+  assert.equal(run(real, "create", "--id", "c1", "--title", "t").status, 0, "a write starts the database");
+  assert.equal(run(real, "events", "--context", "c1").status, 0, "and a read finds it");
 });
