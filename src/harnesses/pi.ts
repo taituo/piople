@@ -359,7 +359,10 @@ export class PiHarness implements Harness {
     // and cutting the arguments would let part of the call go unseen. Larger calls are refused, not truncated.
     const shown = canonical(args);
     if (shown.length > MAX_APPROVAL_ARGS) return `the arguments of this ${name} call are ${shown.length} characters, more than a person can review (${MAX_APPROVAL_ARGS}): make a smaller call`;
-    const id = `tool-${createHash("sha256").update(`${name}\0${shown}`).digest("hex").slice(0, 20)}`;
+    // The id is derived from the call, so anyone can compute it. Starting it with this agent's own id keeps it for the agent
+    // (Core reserves ids of the form "<actor>@…"): nobody else can create the decision first, with another question, and get
+    // the person to answer "allow" to something other than the call that will then run.
+    const id = `${this.actor}@tool-${createHash("sha256").update(`${name}\0${shown}`).digest("hex").slice(0, 20)}`;
     const d = await s.run<{ found: boolean; status?: string; answer?: string; decidedBy?: string }>("decision-get", { id });
     if (d.found && d.status === "resolved") return d.answer === "allow" ? null : `${d.decidedBy ?? "a person"} denied this call (decision ${id}): ${name} will not run`;
     if (!d.found) await s.run("decision-request", { id, question: `Allow ${this.actor} to run ${name} ${shown}?`, options: "allow,deny" });
