@@ -343,6 +343,7 @@ test("Core not answering while the agent acts is not 'REFUSED' feedback: the ste
   assert.equal(isTransient(new Error("core-unreachable: http://x (fetch failed)")), true);
   assert.equal(isTransient(Object.assign(new Error("HTTP 503"), { status: 503 })), true);
   assert.equal(isTransient(new Error("database is locked")), true);
+  for (const [status, want] of [[500, true], [499, false], [408, true], [407, false], [502, true], [429, false], [404, false]] as const) assert.equal(isTransient(Object.assign(new Error("x"), { status })), want, `status ${status}`);
   assert.equal(isTransient(Object.assign(new Error("forbidden: x"), { status: 403 })), false, "a refusal is feedback");
   assert.equal(isTransient(Object.assign(new Error("hop-limit: x"), { status: 429 })), false, "a limit is a rule");
   assert.equal(isTransient(new Error("not-a-member: agent:pi not in c1")), false);
