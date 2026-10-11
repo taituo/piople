@@ -38,3 +38,22 @@ test("consensus: keeps name, version and the external flag visible", () => {
   const c = consensusClassifier({ name: "jev", version: "v9", external: true, classify: async () => { throw new Error("no"); } });
   assert.deepEqual([c.name, c.version, c.external], ["consensus(jev)", "v9", true]);
 });
+
+test("consensus: the same destination with a different skill is not agreement (work in one order, a plain message in the other)", async () => {
+  const withSkill = (skillOf: (first: string) => string | null): Classifier => ({
+    name: "fake", version: "1",
+    async classify(i) { return { choice: "a", probabilities: { a: 0.9, b: 0.1 }, confidence: 0.9, skill: skillOf(i.targets[0]!.id) }; },
+  });
+  const differs = await consensusClassifier(withSkill((first) => (first === "a" ? "k8s.inspect" : null))).classify(input);
+  assert.equal(differs.choice, null, "one order wants work, the other a message: nothing is routed");
+  assert.equal(differs.confidence, 0);
+  assert.deepEqual((differs.extras as any).consensus, { first: "a", second: "a", agree: false, skills: { first: "k8s.inspect", second: null } });
+  const other = await consensusClassifier(withSkill((first) => (first === "a" ? "k8s.inspect" : "web.search"))).classify(input);
+  assert.equal(other.choice, null, "two different skills do not agree either");
+  const same = await consensusClassifier(withSkill(() => "k8s.inspect")).classify(input);
+  assert.equal(same.choice, "a");
+  assert.equal(same.skill, "k8s.inspect", "the same skill in both is kept");
+  const none = await consensusClassifier(withSkill(() => null)).classify(input);
+  assert.equal(none.choice, "a");
+  assert.ok(none.skill == null);
+});

@@ -16,8 +16,12 @@ export function consensusClassifier(base: Classifier): Classifier {
       const [a, b] = await Promise.all([base.classify(input), base.classify({ ...input, targets: [...input.targets].reverse() })]);
       const keys = Object.keys(a.probabilities);
       const probabilities = Object.fromEntries(keys.map((k) => [k, ((a.probabilities[k] ?? 0) + (b.probabilities[k] ?? 0)) / 2]));
-      const extras = { ...a.extras, consensus: { first: a.choice, second: b.choice, agree: a.choice === b.choice } };
-      if (a.choice !== b.choice) return { choice: null, probabilities, confidence: 0, extras };
+      // Agreeing means the same destination AND the same skill: a classifier can turn a message into work for a skill, and "work for
+      // k8s.inspect" in one order against "a plain message" in the other is not agreement, whichever came first.
+      const skillA = a.skill ?? null, skillB = b.skill ?? null;
+      const agree = a.choice === b.choice && skillA === skillB;
+      const extras = { ...a.extras, consensus: { first: a.choice, second: b.choice, agree, ...(skillA !== skillB ? { skills: { first: skillA, second: skillB } } : {}) } };
+      if (!agree) return { choice: null, probabilities, confidence: 0, extras };
       return { choice: a.choice, probabilities, confidence: Math.min(a.confidence, b.confidence), ...(a.skill ? { skill: a.skill } : {}), extras };
     },
   };
