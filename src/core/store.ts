@@ -276,7 +276,13 @@ export class Store {
     // The same holds for the ids a Host mints (`decision:<id>`, `work:<id>`, `create:<id>` keys): look past the type prefix.
     const probe = m.key.replace(/^(?:create|artifact|decision|proposal|work):(?=(?:human|agent):)/, ""); // only where the caller chooses the id
     if (/^(?:human|agent):\S+?@/.test(probe)) {
-      const member = (this.db.prepare(`SELECT actor_id FROM members WHERE context_id=? AND substr(?,1,length(actor_id)+1)=actor_id||'@' ORDER BY length(actor_id) DESC LIMIT 1`).get(m.contextId, probe) as { actor_id: string } | undefined)?.actor_id;
+      // The candidates are the parts of the key before each "@" (at most 16): a lookup of those in the members' index, not a scan
+      // of all the members for every write (1 ms a write with 5,000 members, ten times a plain one).
+      const candidates: string[] = [];
+      for (let i = probe.indexOf("@"); i > 0 && candidates.length < 16; i = probe.indexOf("@", i + 1)) candidates.push(probe.slice(0, i));
+      const member = candidates.length
+        ? (this.db.prepare(`SELECT actor_id FROM members WHERE context_id=? AND actor_id IN (${candidates.map(() => "?").join(",")}) ORDER BY length(actor_id) DESC LIMIT 1`).get(m.contextId, ...candidates) as { actor_id: string } | undefined)?.actor_id
+        : undefined;
       const owner = [member, probe.startsWith(`${m.actorId}@`) ? m.actorId : undefined].filter((x): x is string => !!x).sort((a, b) => b.length - a.length)[0];
       if (owner !== m.actorId) throw new Error(`forbidden: a key that starts with an actor id and "@" is reserved for that actor; ${m.actorId} may not use ${JSON.stringify(m.key.slice(0, 80))}`);
     }
