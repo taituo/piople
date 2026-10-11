@@ -342,3 +342,23 @@ test("work-list is bounded in bytes too, and the first item always comes", async
   assert.equal((await as("agent:x")("work-list", { context: "c1", id: "w11" })).length, 1, "one item by id is always reachable");
   store.close();
 });
+
+test("the exact edges of the inbox list bounds: 50 items fit, the 51st does not; 200,000 characters fit, one more does not", async () => {
+  const { alice, as, store } = world();
+  await alice("create", { id: "c1", title: "t" });
+  await alice("join", { context: "c1", actor: "agent:x", caps: "read,write" });
+  for (let i = 0; i < 51; i++) await alice("work-request", { context: "c1", id: `s${i}`, to: "agent:x", input: "{}" });
+  const byCount = (await as("agent:x")("inbox", { context: "c1" })).pending;
+  assert.equal(byCount.work.open.length, 50, "50 fit");
+  assert.equal(byCount.work.moreOpen, 1, "the 51st is counted as left out");
+  // a second context: items of exactly 50,000 characters each (the JSON of a 49,998 character string), so four make 200,000
+  await alice("create", { id: "c2", title: "t" });
+  await alice("join", { context: "c2", actor: "agent:x", caps: "read,write" });
+  const item = JSON.stringify("x".repeat(49_998));
+  assert.equal(item.length, 50_000);
+  for (let i = 0; i < 5; i++) await alice("work-request", { context: "c2", id: `b${i}`, to: "agent:x", input: item });
+  const bySize = (await as("agent:x")("inbox", { context: "c2" })).pending;
+  assert.equal(bySize.work.open.length, 4, "four items of 50,000 are exactly 200,000: they fit");
+  assert.equal(bySize.work.moreOpen, 1, "the fifth is one item over");
+  store.close();
+});
