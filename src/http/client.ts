@@ -40,6 +40,17 @@ export class HttpCore implements CoreClient {
     this.o = { retries: o.retries ?? 3, timeoutMs: o.timeoutMs ?? 10_000, backoffMs: o.backoffMs ?? 100, maxBackoffMs: o.maxBackoffMs ?? 2_000, fetch: o.fetch ?? fetch };
   }
 
+  /**
+   * A message that came from the server goes into exceptions and from there into logs. A gateway or proxy that answers a
+   * refusal by repeating the request (some do) would write the Bearer token there, so every token this client holds is
+   * masked, and a very long message is cut.
+   */
+  private safe(message: unknown): string {
+    let text = typeof message === "string" ? message : JSON.stringify(message) ?? "";
+    for (const t of this.tokens.values()) if (t.length >= 8) text = text.split(t).join("[token]");
+    return text.length > 2000 ? `${text.slice(0, 2000)}… [${text.length - 2000} more characters]` : text;
+  }
+
   async call(as: string, op: string, args: Args = {}): Promise<unknown> {
     const token = this.tokens.get(as);
     if (!token) throw new Error(`no-token: this client holds no credential for ${as}`);
@@ -60,7 +71,7 @@ export class HttpCore implements CoreClient {
         });
         const body = (await res.json().catch(() => ({}))) as { result?: unknown; error?: { code?: string; message?: string } };
         if (res.ok) return body.result;
-        const err = new CoreError(res.status, body.error?.code ?? "error", body.error?.message ?? `HTTP ${res.status}`);
+        const err = new CoreError(res.status, body.error?.code ?? "error", this.safe(body.error?.message ?? `HTTP ${res.status}`));
         if (res.status < 500) throw err; // the core answered: retrying will not change a refusal
         lastError = err;
       } catch (e) {
@@ -71,6 +82,6 @@ export class HttpCore implements CoreClient {
       await new Promise((r) => setTimeout(r, Math.min(this.o.backoffMs * 2 ** attempt, this.o.maxBackoffMs)));
     }
     if (lastError instanceof CoreError) throw lastError;
-    throw new Error(`core-unreachable: ${this.base} (${lastError instanceof Error ? lastError.message : String(lastError)})`);
+    throw new Error(`core-unreachable: ${this.base} (${this.safe(lastError instanceof Error ? lastError.message : String(lastError))})`);
   }
 }

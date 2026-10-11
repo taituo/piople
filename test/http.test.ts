@@ -424,3 +424,28 @@ test("405 answers say which methods are allowed, and HEAD works wherever GET doe
   await srv.close();
   store.close();
 });
+
+test("a server (or a proxy) that repeats the request in an error cannot get the Bearer token into an exception", async () => {
+  const TOKEN = "pio_SECRET_TOKEN_VALUE_1234567890";
+  const srv = http.createServer((req, res) => {
+    let b = ""; req.on("data", (d) => (b += d)); req.on("end", () => {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { code: "bad-request", message: JSON.stringify({ headers: req.headers, body: b }) + "x".repeat(5000) } }));
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${(srv.address() as net.AddressInfo).port}`;
+  const core = new HttpCore(url, { "human:alice": TOKEN, "agent:b": "pio_ANOTHER_TOKEN_9876543210" }, { retries: 0, backoffMs: 1 });
+  try {
+    await assert.rejects(core.call("human:alice", "actor", {}), (e: Error) => {
+      assert.ok(!e.message.includes(TOKEN), "the token is not in the message");
+      assert.ok(!JSON.stringify(Object.getOwnPropertyNames(e).map((k) => String((e as any)[k]))).includes(TOKEN));
+      assert.match(e.message, /Bearer \[token\]/, "and the message still says what the server said");
+      assert.ok(e.message.length < 2200, `${e.message.length} characters`);
+      return true;
+    });
+  } finally {
+    srv.closeAllConnections();
+    srv.close();
+  }
+});
