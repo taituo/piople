@@ -134,7 +134,12 @@ export class K8sLauncher implements Harness {
     const now = (this.o.now ?? Date.now)();
     if (now - this.lastLook < (this.o.everyMs ?? 2000)) return 0;
     this.lastLook = now;
-    const work = await api.run<Array<{ id: string; contextId: string; skill: string | null; to: string | null; createdAt: number }>>("work-list", { status: "claimable" });
+    // One look per skill it has a profile for: a single list of all claimable work shows only the oldest 200 items, and work
+    // nobody can launch for (another skill, no profile) in front of them would hide the work that can be launched, for ever.
+    type Item = { id: string; contextId: string; skill: string | null; to: string | null; createdAt: number };
+    const work: Item[] = [];
+    for (const skill of this.skills) work.push(...(await api.run<Item[]>("work-list", { status: "claimable", skill })));
+    work.sort((a, b) => a.createdAt - b.createdAt);
     const live = new Set<string>();
     let started = 0;
     for (const w of work) {

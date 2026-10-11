@@ -153,3 +153,16 @@ test("egress gate: the Job gets an init container without the token; without a g
   assert.equal(JSON.stringify(init).includes("PIO_TOKEN"), false);
   assert.equal(init.securityContext.readOnlyRootFilesystem, true);
 });
+
+test("work nobody can launch for cannot stand in front of the work that can be: 250 requests for a skill without a profile do not hide a later real one", async () => {
+  const { runner, created } = fakeRunner();
+  const skew = { ms: 0 };
+  const { store, alice, host } = await world(60_000, runner, skew);
+  for (let i = 0; i < 250; i++) await alice("work-request", { context: "c1", id: `junk${i}`, skill: "no.profile", input: {} });
+  await alice("work-request", { context: "c1", id: "real", skill: "lab.echo", input: { n: 1 } });
+  skew.ms = 61_000;
+  for (let i = 0; i < 3; i++) await host.tick();
+  assert.deepEqual(created.map((m) => m.metadata.name), [jobName("c1", "real")], "the real work got its Job");
+  await host.close();
+  store.close();
+});
