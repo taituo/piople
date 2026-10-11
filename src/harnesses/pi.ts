@@ -133,13 +133,27 @@ function canonical(v: unknown): string {
   return JSON.stringify(v) ?? "null";
 }
 
+/** One line of what is owed, at most this long in the prompt (a question may be 20,000 characters, an input a megabyte). */
+const MAX_OWED_LINE = 4000;
+/** All the owed lines together. Over it the rest is only counted: it comes into view as these are dealt with. */
+const MAX_OWED_TOTAL = 40_000;
+const clip = (t: string) => (t.length > MAX_OWED_LINE ? `${t.slice(0, MAX_OWED_LINE)} … [${t.length - MAX_OWED_LINE} more characters; work-claim returns a work input whole]` : t);
+
 export function renderStep(s: Step, maxEvents = 40): string | null {
   const events = s.events.filter((e) => e.actorId !== s.actor);
+  const all: string[] = [];
+  for (const a of s.pending.assistance) all.push(clip(`ASK ${a.key} from ${a.from}: ${a.question}`));
+  for (const d of s.pending.decisions) all.push(clip(`DECISION ${d.id} [${d.options.join("/")}]: ${d.question}`));
+  for (const w of s.pending.work.mine) all.push(clip(`WORK YOU HOLD ${w.id} attempt ${w.attempt}: ${JSON.stringify(w.input)}`));
+  for (const w of s.pending.work.open) all.push(clip(`WORK YOU MAY TAKE ${w.id}${w.skill ? ` (skill ${w.skill})` : ""}: ${JSON.stringify(w.input)}`));
   const owed: string[] = [];
-  for (const a of s.pending.assistance) owed.push(`ASK ${a.key} from ${a.from}: ${a.question}`);
-  for (const d of s.pending.decisions) owed.push(`DECISION ${d.id} [${d.options.join("/")}]: ${d.question}`);
-  for (const w of s.pending.work.mine) owed.push(`WORK YOU HOLD ${w.id} attempt ${w.attempt}: ${JSON.stringify(w.input)}`);
-  for (const w of s.pending.work.open) owed.push(`WORK YOU MAY TAKE ${w.id}${w.skill ? ` (skill ${w.skill})` : ""}: ${JSON.stringify(w.input)}`);
+  let owedChars = 0;
+  for (const line of all) {
+    if (owed.length && owedChars + line.length > MAX_OWED_TOTAL) break;
+    owed.push(line);
+    owedChars += line.length;
+  }
+  if (owed.length < all.length) owed.push(`(${all.length - owed.length} more owed to you, not shown here: they follow as you deal with these)`);
   if (!events.length && !owed.length) return null;
   const shown = events.slice(-maxEvents);
   return [

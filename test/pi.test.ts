@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Store } from "../src/core/index.ts";
 import { Host, LocalCore } from "../src/hosts/host.ts";
 import type { CoreClient } from "../src/hosts/types.ts";
-import { PiHarness, parseCommands } from "../src/harnesses/pi.ts";
+import { PiHarness, parseCommands, renderStep } from "../src/harnesses/pi.ts";
 import { fakeModel, lastUser } from "./fake-model.ts";
 
 const piOpts = (baseUrl: string, dir = ":memory:") => ({ actor: "agent:pi", dir, role: "You are a careful analyst.", provider: { baseUrl }, modelId: "fake-1" });
@@ -275,4 +275,25 @@ test("a model that accepts the request and never answers fails the delivery afte
   srv.close();
   store.close();
   process.exitCode ||= 0;
+});
+
+test("what is owed to a Pi agent is clipped in the prompt: a flood of long asks, decisions and work cannot make every model call enormous", () => {
+  const long = "q".repeat(19_000);
+  const step = {
+    actor: "agent:pi", context: "c1", cursor: 0, events: [],
+    pending: {
+      assistance: Array.from({ length: 50 }, (_, i) => ({ key: `a${i}`, from: "human:alice", question: long, seq: i + 1 })),
+      decisions: [{ id: "d1", question: "ship?", options: Array.from({ length: 2_000 }, (_, j) => `option-number-${j}`), requestedBy: "human:alice" }],
+      work: { open: [{ id: "w1", from: "human:alice", skill: null, to: "agent:pi", input: { blob: "z".repeat(150_000) } }], mine: [] },
+    },
+    run: async () => ({}),
+  } as never;
+  const text = renderStep(step)!;
+  assert.ok(text.length < 60_000, `the prompt was ${text.length} characters`);
+  assert.match(text, /ASK a0 from human:alice: q+ … \[\d+ more characters/, "a long line says it was clipped");
+  assert.match(text, /\(\d+ more owed to you, not shown here/, "and the rest is counted");
+  assert.match(text, /ASK a0 /, "the first is always there");
+  const small = renderStep({ ...(step as object), pending: { assistance: [{ key: "a1", from: "human:bob", question: "what time?", seq: 1 }], decisions: [], work: { open: [], mine: [] } } } as never)!;
+  assert.match(small, /ASK a1 from human:bob: what time\?/, "short ones are untouched");
+  assert.doesNotMatch(small, /more characters|not shown/);
 });
