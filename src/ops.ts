@@ -21,18 +21,27 @@ type Op = {
   run(s: Store, as: string, a: Args): unknown;
 };
 
+/** A value as a person gave it, for a message: text as it is, anything else as JSON (not "[object Object]"), cut short. */
+const shown = (v: unknown): string => (typeof v === "string" ? JSON.stringify(v.slice(0, 40)) : (JSON.stringify(v) ?? String(v)).slice(0, 40));
+
 const str = (a: Args, k: string) => {
   const v = a[k];
   if (v !== null && typeof v === "object") throw new Error(`bad-arg: ${k} must be text, not ${Array.isArray(v) ? "a list" : "an object"}`); // String({}) would store "[object Object]"
   return String(v);
 };
 /** A comma-separated list (or an array): items are trimmed and empty ones dropped, so "yes, no" is ["yes", "no"], not ["yes", " no"]. */
-const list = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : v == null || v === "" ? [] : String(v).split(",")).map((x) => x.trim()).filter((x) => x !== "");
+const list = (v: unknown): string[] => {
+  // text ("a,b") or a list of text; an object, or a list holding objects, would have become "[object Object]" as a decision option,
+  // a capability or a skill
+  const plain = (x: unknown) => typeof x === "string" || typeof x === "number" || typeof x === "boolean";
+  if (v != null && !plain(v) && !(Array.isArray(v) && v.every(plain))) throw new Error(`bad-arg: a list is text like "a,b" or a list of text (got ${shown(v)})`);
+  return (Array.isArray(v) ? v.map(String) : v == null || v === "" ? [] : String(v).split(",")).map((x) => x.trim()).filter((x) => x !== "");
+};
 /** The options of a new decision: yes/no unless given. A list that comes out empty (`--options ","`) is an error, not "any answer". */
 const decisionOptions = (v: unknown): string[] => {
   if (v == null) return ["yes", "no"];
   const options = list(v);
-  if (!options.length) throw new Error(`bad-options: a decision needs at least one option (got ${JSON.stringify(String(v).slice(0, 40))})`);
+  if (!options.length) throw new Error(`bad-options: a decision needs at least one option (got ${shown(v)})`);
   return options;
 };
 /** Deepest nesting an argument may have. Checked iteratively: the recursive code that follows (hashing, size, storing as JSON) overflows the stack at a few thousand levels, which came out of the HTTP server as a 500. */
@@ -62,7 +71,7 @@ const json = (v: unknown): unknown => {
 const flag = (v: unknown): boolean => {
   if (v == null || v === false || v === "false") return false;
   if (v === true || v === "true") return true;
-  throw new Error(`bad-flag: ${JSON.stringify(String(v).slice(0, 40))} is not true or false`);
+  throw new Error(`bad-flag: ${shown(v)} is not true or false`);
 };
 /**
  * A number argument. Over the CLI and MCP everything arrives as text; `Number("nope")` is NaN, and the message that followed
@@ -72,7 +81,7 @@ function num(a: Args, key: string, code: string, fallback?: number): number | un
   const v = a[key];
   if (v == null) return fallback;
   const n = typeof v === "string" && v.trim() === "" ? NaN : Number(v);
-  if (Number.isNaN(n)) throw new Error(`${code}: ${key} ${JSON.stringify(String(v).slice(0, 40))} is not a number`);
+  if (Number.isNaN(n)) throw new Error(`${code}: ${key} ${shown(v)} is not a number`);
   return n;
 }
 
@@ -131,7 +140,7 @@ export const OPS: Record<string, Op> = {
     description: "What I owe attention: without --context a summary of all my cases (pending counts everything owed); with it the events after my cursor (a page ends at --limit events or about 4 MB: ack the last seq you got and read again) plus pending asks, decisions and work. Each pending list shows at most 50 items or 200,000 characters; moreAssistance, moreDecisions and work.moreOpen say how many were left out, and they come as these are dealt with",
     required: [], optional: ["context", "limit", "holder"],
     run: (s, as, a) => {
-      s.requireHolder(as, a.holder == null ? undefined : String(a.holder));
+      s.requireHolder(as, a.holder == null ? undefined : str(a, "holder"));
       return a.context == null ? s.inbox(as) : s.inboxOf(str(a, "context"), as, num(a, "limit", "bad-arg", 200)!);
     },
   },
@@ -139,7 +148,7 @@ export const OPS: Record<string, Op> = {
     description: "Move my read cursor forward to --seq (never back). Does not resolve pending items",
     required: ["context", "seq"], optional: ["holder"],
     run: (s, as, a) => {
-      s.requireHolder(as, a.holder == null ? undefined : String(a.holder));
+      s.requireHolder(as, a.holder == null ? undefined : str(a, "holder"));
       return { cursor: s.ack(str(a, "context"), as, num(a, "seq", "bad-seq")!) };
     },
   },
@@ -320,7 +329,7 @@ export function runOp(s: Store, as: string, name: string, a: Args): unknown {
   // A new actor id must be NFC and have no invisible characters; one that already exists keeps working under its old id.
   const actorOk = (v: string) => BASIC_ACTOR.test(v) && ((ACTOR_ID.test(v) && isNfc(v)) || s.knowsActor(v));
   if (!actorOk(as)) throw new Error(`bad-actor: ${JSON.stringify(as)} is not human:<id> or agent:<id>`);
-  for (const k of ACTOR_ARGS) if (a[k] != null && a[k] !== "" && !actorOk(String(a[k]))) throw new Error(`bad-actor: ${k} ${JSON.stringify(String(a[k]).slice(0, 80))} is not human:<id> or agent:<id>`);
+  for (const k of ACTOR_ARGS) if (a[k] != null && a[k] !== "" && !actorOk(String(a[k]))) throw new Error(`bad-actor: ${k} ${shown(a[k])} is not human:<id> or agent:<id>`);
   for (const k of Object.keys(a)) if (tooDeep(a[k])) throw new Error(`bad-arg: ${k} is nested deeper than ${MAX_DEPTH} levels`);
   for (const k of [...op.required, ...(op.optional ?? [])]) {
     const v = a[k];

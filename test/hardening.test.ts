@@ -421,3 +421,24 @@ test("the descriptions agents read say what the bounded reads do", async () => {
     for (const w of words) assert.ok(OPS[op]!.description.includes(w), `${op} does not mention ${w}`);
   }
 });
+
+test("a value that is an object or a list shows as JSON in a message, never as [object Object]", async () => {
+  const { alice, store } = world();
+  await alice("create", { id: "c1", title: "t" });
+  const obj = { a: 1 }, list = [1, 2];
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ["events", { context: "c1", after: obj }], ["events", { context: "c1", limit: list }], ["ack", { context: "c1", seq: obj }],
+    ["host-lease", { holder: "h", "ttl-ms": obj }], ["inbox", { context: "c1", holder: obj }], ["ack", { context: "c1", seq: 1, holder: list }],
+    ["join", { context: "c1", actor: obj, caps: "read" }], ["ask", { context: "c1", to: list, question: "q" }], ["work-claim", { context: "c1", next: obj }],
+    ["decision-request", { context: "c1", id: "d1", question: "q", options: obj }],
+  ];
+  for (const [op, args] of cases) {
+    await assert.rejects(alice(op, args), (e: Error) => !/\[object Object\]|NaN|undefined/.test(e.message), `${op} ${JSON.stringify(args)}`);
+  }
+  await assert.rejects(alice("events", { context: "c1", after: obj }), /bad-seq: after \{"a":1\} is not a number$/);
+  await assert.rejects(alice("decision-request", { context: "c1", id: "d9", question: "q", options: [{ a: 1 }] }), /bad-arg: a list is text like "a,b" or a list of text \(got /);
+  await assert.rejects(alice("join", { context: "c1", actor: "agent:x", caps: { read: true } }), /bad-arg: a list is text/);
+  await alice("decision-request", { context: "c1", id: "d10", question: "q", options: ["yes", "no"] }); // a list of text, and "yes,no", still work
+  await alice("decision-request", { context: "c1", id: "d11", question: "q", options: "yes, no" });
+  store.close();
+});
