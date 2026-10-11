@@ -89,3 +89,16 @@ test("pending asks are found in linear time: 6,000 open asks and some answered o
   assert.ok(took < 500, `took ${took} ms (the correlated NOT EXISTS needed about 3 s for 6,000)`);
   s.close();
 });
+
+test("the inbox summary counts everything owed, also what the bounded lists leave out", () => {
+  const s = new Store(":memory:");
+  s.createContext({ id: "c", kind: "case", title: "t", goal: "", createdAt: 1 }, "human:a");
+  s.join({ contextId: "c", actorId: "agent:x", capabilities: ["read", "write", "decide"], joinedAt: 2 }, "jx", "human:a");
+  for (let i = 0; i < 120; i++) s.requestAssistance("c", "human:a", `a${i}`, "agent:x", "q?", {});
+  for (let i = 0; i < 70; i++) s.requestWork("c", "human:a", { id: `w${i}`, to: "agent:x", input: {} });
+  for (let i = 0; i < 60; i++) s.requestDecision({ id: `d${i}`, contextId: "c", question: "q", options: ["a", "b"], requestedBy: "human:a", decidedBy: null, answer: null, status: "open", createdAt: 1, resolvedAt: null });
+  const detail = s.inboxOf("c", "agent:x");
+  assert.ok(detail.pending.assistance.length <= 50 && detail.pending.work.open.length <= 50 && detail.pending.decisions.length <= 50, "the lists are bounded");
+  assert.equal(s.inbox("agent:x")[0]!.pending, 120 + 70 + 60, "and the summary still counts all 250");
+  s.close();
+});

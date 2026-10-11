@@ -1118,7 +1118,7 @@ export class Store {
       const cursor = this.cursor(c.id, actorId);
       const unread = (this.db.prepare(`SELECT COUNT(*) n FROM events WHERE context_id=? AND seq>? AND actor_id<>?`).get(c.id, cursor, actorId) as { n: number }).n;
       const p = this.pending(c.id, actorId);
-      return { context: c.id, title: c.title, kind: c.kind, realm: c.realm_id, cursor, unread, pending: p.assistance.length + p.decisions.length + p.work.open.length + p.work.mine.length };
+      return { context: c.id, title: c.title, kind: c.kind, realm: c.realm_id, cursor, unread, pending: p.assistance.length + (p.moreAssistance ?? 0) + p.decisions.length + (p.moreDecisions ?? 0) + p.work.open.length + (p.work.moreOpen ?? 0) + p.work.mine.length }; // the lists in `p` are bounded: add what they left out
     });
   }
 
