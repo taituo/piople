@@ -54,3 +54,27 @@ test("many processes opening the same old database at once all upgrade it safely
   assert.equal(s.eventsSince("c1", 0).length, 2);
   s.close();
 });
+
+test("a database from a newer version is refused with a clear error, untouched, and a database at the current version still opens", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { Store } = await import("../src/core/index.ts");
+  const path = join(mkdtempSync(join(tmpdir(), "piople-newer-")), "x.db");
+  const first = new Store(path);
+  first.createContext({ id: "c1", kind: "case", title: "t", goal: "", createdAt: 1 }, "human:alice");
+  first.close();
+  const db = new DatabaseSync(path);
+  const current = Number((db.prepare("SELECT v FROM meta WHERE k='version'").get() as { v: string }).v);
+  db.prepare("UPDATE meta SET v=? WHERE k='version'").run(String(current + 5));
+  const before = JSON.stringify(db.prepare("SELECT seq, type FROM events").all());
+  db.close();
+  assert.throws(() => new Store(path), (e: Error) => new RegExp(`^cannot-open-database: .*database-too-new: this database is at schema version ${current + 5}, this program knows up to ${current}`).test(e.message));
+  const after = new DatabaseSync(path);
+  assert.equal(JSON.stringify(after.prepare("SELECT seq, type FROM events").all()), before, "nothing was written");
+  assert.equal((after.prepare("SELECT v FROM meta WHERE k='version'").get() as { v: string }).v, String(current + 5), "and the version is as it was");
+  after.prepare("UPDATE meta SET v=? WHERE k='version'").run(String(current));
+  after.close();
+  new Store(path).close(); // back at the current version, it opens again
+});

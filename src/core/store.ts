@@ -216,7 +216,13 @@ export class Store {
   private migrate() {
     this.db.exec(`CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);`);
     const current = () => Number((this.db.prepare(`SELECT v FROM meta WHERE k='version'`).get() as { v: string } | undefined)?.v ?? 0);
-    for (let i = current(); i < MIGRATIONS.length; i++) {
+    // A database made by a newer version of this program (a rollback of a deployment, an old image started against the volume of a
+    // new one) has a layout this code does not know: writing to it with the old statements is how a database gets damaged.
+    const found = current();
+    if (found > MIGRATIONS.length) {
+      throw new Error(`database-too-new: this database is at schema version ${found}, this program knows up to ${MIGRATIONS.length}: run the version that made it, or one that is newer`);
+    }
+    for (let i = found; i < MIGRATIONS.length; i++) {
       this.tx(() => {
         // Read again now that this process holds the write lock: another process opening the same old database may have
         // applied this step while we waited (an ALTER TABLE run twice fails with "duplicate column name").
