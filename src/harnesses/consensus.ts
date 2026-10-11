@@ -20,7 +20,10 @@ export function consensusClassifier(base: Classifier): Classifier {
       // k8s.inspect" in one order against "a plain message" in the other is not agreement, whichever came first.
       const skillA = a.skill ?? null, skillB = b.skill ?? null;
       const agree = a.choice === b.choice && skillA === skillB;
-      const extras = { ...a.extras, consensus: { first: a.choice, second: b.choice, agree, ...(skillA !== skillB ? { skills: { first: skillA, second: skillB } } : {}) } };
+      // "A person is needed" is a reason to hold back: if either answer says so, the higher figure is the one the router sees
+      // (it used to see only the first answer's).
+      const human = [a.extras?.needsHuman, b.extras?.needsHuman].filter((x): x is number => typeof x === "number");
+      const extras = { ...a.extras, ...(human.length ? { needsHuman: Math.max(...human) } : {}), consensus: { first: a.choice, second: b.choice, agree, ...(skillA !== skillB ? { skills: { first: skillA, second: skillB } } : {}) } };
       if (!agree) return { choice: null, probabilities, confidence: 0, extras };
       return { choice: a.choice, probabilities, confidence: Math.min(a.confidence, b.confidence), ...(a.skill ? { skill: a.skill } : {}), extras };
     },

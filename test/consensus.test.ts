@@ -57,3 +57,14 @@ test("consensus: the same destination with a different skill is not agreement (w
   assert.equal(none.choice, "a");
   assert.ok(none.skill == null);
 });
+
+test("consensus: if either answer says a person is needed, the router sees the higher figure", async () => {
+  let n = 0;
+  const base: Classifier = { name: "f", version: "1", async classify() { n++; return { choice: "a", probabilities: { a: 0.9, b: 0.1 }, confidence: 0.9, extras: { needsHuman: n === 1 ? 0.1 : 0.9, provider: "x" } }; } };
+  const r = await consensusClassifier(base).classify(input);
+  assert.equal(r.choice, "a", "they agree on where");
+  assert.equal((r.extras as any).needsHuman, 0.9, "but the second answer wanted a person");
+  assert.equal((r.extras as any).provider, "x", "the rest of the extras are kept");
+  const none = await consensusClassifier(fixed(() => "a")).classify(input);
+  assert.equal((none.extras as any).needsHuman, undefined, "no figure when neither gave one");
+});
