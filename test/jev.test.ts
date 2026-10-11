@@ -240,3 +240,22 @@ test("jev: earlier messages go out as {own, text} only, with a reply hint; witho
   assert.doesNotMatch(bodies[1].questions.target.instructions, /recent_messages/);
   assert.match(bodies[1].questions.target.instructions, /choose that channel and not the realm/);
 });
+
+test("only the beginning of a long message (and of each earlier one) leaves: a megabyte is neither paid for nor refused by the provider", async () => {
+  const jev = await fakeJev((b) => answerFor(b, "ch-incidents"));
+  const c = jevClassifier({ apiKey: KEY, model: MODEL, endpoint: jev.url });
+  const long = "production servers keep crashing " + "x".repeat(1_000_000);
+  await c.classify({ ...input(long), recent: [{ own: true, text: "y".repeat(500_000) }, { own: false, text: "short earlier" }] });
+  const sent = JSON.stringify(jev.requests[0]!.body);
+  assert.ok(sent.length < 20_000, `the request was ${sent.length} characters`);
+  const state = (jev.requests[0]!.body as { state: { message: string; recent_messages: Array<{ own: boolean; text: string }> } }).state;
+  assert.equal(state.message.length, 4000);
+  assert.match(state.message, /^production servers keep crashing /, "the beginning is what is sent");
+  assert.deepEqual(state.recent_messages.map((r) => r.text.length), [4000, 13]);
+  assert.equal(state.recent_messages[1]!.text, "short earlier", "short ones are untouched");
+  await c.classify(input("tiny"));
+  assert.equal((jev.requests[1]!.body as { state: { message: string } }).state.message, "tiny");
+  await jevClassifier({ apiKey: KEY, model: MODEL, endpoint: jev.url, maxChars: 10 }).classify(input("0123456789abcdef"));
+  assert.equal((jev.requests[2]!.body as { state: { message: string } }).state.message, "0123456789", "maxChars is adjustable");
+  await jev.close();
+});

@@ -23,6 +23,8 @@ export type JevOptions = {
   model: string;
   endpoint?: string;
   timeoutMs?: number;
+  /** The most characters of a message (and of each earlier message) that leave for the classifier (default 4000). */
+  maxChars?: number;
   /** Injectable for tests. */
   fetch?: typeof fetch;
 };
@@ -81,13 +83,16 @@ export function jevClassifier(o: JevOptions): Classifier {
       if (input.targets.some((t) => t.id === NONE)) throw new Error(`a destination may not be called ${NONE}`);
       const labels = [...input.targets.map((t) => t.id), NONE];
       const criteria = { ...Object.fromEntries(input.targets.map((t) => [t.id, `${t.kind}: ${t.title}`])), [NONE]: "No listed destination clearly fits the message." };
+      // A message may be a megabyte and the classifier is paid per token: whoever can send a message could spend the key empty,
+      // and the provider refuses what is too long. Where a message is about is in its beginning.
+      const max = Math.max(1, o.maxChars ?? 4000);
       let response: Response;
       try {
         response = await request(endpoint, {
           method: "POST", redirect: "error", signal: AbortSignal.timeout(o.timeoutMs ?? 30_000),
           headers: { "content-type": "application/json", authorization: `Bearer ${o.apiKey}` },
           // Only text leaves: not the sender, not the hop count; earlier messages only as {own, text}, without who wrote them.
-          body: JSON.stringify({ model: o.model, state: { message: input.text, ...(input.recent?.length ? { recent_messages: input.recent } : {}) }, questions: { target: { type: "choice", instructions: input.recent?.length ? INSTRUCTIONS + REPLY : INSTRUCTIONS, criteria }, needs_human: { type: "noul", instructions: HUMAN } } }),
+          body: JSON.stringify({ model: o.model, state: { message: input.text.slice(0, max), ...(input.recent?.length ? { recent_messages: input.recent.map((r) => ({ own: r.own, text: r.text.slice(0, max) })) } : {}) }, questions: { target: { type: "choice", instructions: input.recent?.length ? INSTRUCTIONS + REPLY : INSTRUCTIONS, criteria }, needs_human: { type: "noul", instructions: HUMAN } } }),
         });
       } catch (e) {
         throw new ClassifierError("transient", `Jev unreachable (${e instanceof Error ? e.name : "error"})`); // never echo the request
