@@ -168,3 +168,15 @@ test("a mistyped flag, or a flag without its value, is a sentence and exit 2 in 
     assert.equal(r.stdout, "");
   }
 });
+
+test("watch: a mistyped database is an error that creates nothing, instead of an empty one and a wait for ever", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { mkdtempSync, existsSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const typo = join(mkdtempSync(join(tmpdir(), "piople-watch-")), "typo.sqlite");
+  const r = spawnSync(process.execPath, ["--no-warnings", "src/hosts/watch.ts", "--as", "human:alice", "--db", typo], { encoding: "utf8", input: "", timeout: 20_000 });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /^error: no database at .*typo\.sqlite \(nothing was created/);
+  assert.equal(existsSync(typo), false);
+});

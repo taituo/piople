@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { parseOrExit } from "../cli/args.ts";
 import { Store } from "../core/index.ts";
@@ -42,7 +43,10 @@ if (values.url) {
   core = new HttpCore(values.url, { [actor]: process.env.PIO_TOKEN });
 } else {
   try {
-    store = new Store(values.db ?? process.env.PIO_DATA ?? "./data/piople.sqlite");
+    const dbPath = values.db ?? process.env.PIO_DATA ?? "./data/piople.sqlite";
+    // Watching waits for what others write; on a mistyped path it would create an empty database and wait for ever.
+    if (!existsSync(dbPath)) { process.stderr.write(`error: no database at ${dbPath} (nothing was created; check --db or PIO_DATA)\n`); process.exit(1); }
+    store = new Store(dbPath);
   } catch (e) {
     process.stderr.write(`error: ${e instanceof Error ? e.message : String(e)}\n`);
     process.exit(1);
