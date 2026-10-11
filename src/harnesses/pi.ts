@@ -127,6 +127,14 @@ export function asText(v: unknown): string {
   try { return JSON.stringify(v) ?? String(v); } catch { return "[unreadable]"; }
 }
 
+/** Trouble that is not a refusal: Core did not answer, answered with a server error, or could not write. Retrying the same step can succeed. */
+export function isTransient(e: unknown): boolean {
+  const status = (e as { status?: unknown } | null)?.status;
+  if (typeof status === "number") return status >= 500 || status === 408; // 429 is a rule (a limit), not trouble: the model is told
+  const message = e instanceof Error ? e.message : String(e);
+  return /^(core-unreachable|no-answer)\b|database is locked|database or disk is full|SQLITE_(BUSY|FULL|IOERR)|\b(ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN)\b|The operation was aborted|fetch failed/i.test(message);
+}
+
 const brief = (d: Record<string, unknown>) => `${typeof d.decisionId === "string" ? `[${d.decisionId}] ` : ""}${asText(d.text ?? d.question ?? d.answer ?? d)}`.slice(0, 400);
 
 /** The longest tool-call arguments a person is asked to approve (characters of the canonical JSON). */
@@ -431,6 +439,11 @@ export class PiHarness implements Harness {
         case "FAIL": await s.run("work-fail", { id: parts[0], attempt: parts[1], reason: parts.slice(2).join(" | ") }); return null;
       }
     } catch (e) {
+      // Only a refusal is feedback for the model: Core answered and said no (a rule, a missing right). Core not answering, a 5xx, a
+      // locked or full database is not the model's doing and not something it can fix: the step throws, the host does not ack and
+      // delivers again, the model's reply is remembered (no second call) and the commands replay under the same keys. Told to the
+      // model as "REFUSED", the reply was lost and the message acked.
+      if (isTransient(e)) throw e;
       const why = e instanceof Error ? e.message : String(e);
       // A model that answers a message with ANSWER used to be told only that the key is unknown, and gave up. Say what to do.
       const hint = cmd === "ANSWER" && /unknown-request/.test(why) ? ' ANSWER is only for an ask listed under "Owed to you". To reply to a message, write POST: <your reply>.' : "";

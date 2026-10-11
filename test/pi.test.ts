@@ -337,3 +337,37 @@ test("after a model round times out the agent recovers: the stuck request is giv
     store.close();
   }
 });
+
+test("Core not answering while the agent acts is not 'REFUSED' feedback: the step is retried, the reply is not paid for twice, and nothing is lost", async () => {
+  const { isTransient } = await import("../src/harnesses/pi.ts");
+  assert.equal(isTransient(new Error("core-unreachable: http://x (fetch failed)")), true);
+  assert.equal(isTransient(Object.assign(new Error("HTTP 503"), { status: 503 })), true);
+  assert.equal(isTransient(new Error("database is locked")), true);
+  assert.equal(isTransient(Object.assign(new Error("forbidden: x"), { status: 403 })), false, "a refusal is feedback");
+  assert.equal(isTransient(Object.assign(new Error("hop-limit: x"), { status: 429 })), false, "a limit is a rule");
+  assert.equal(isTransient(new Error("not-a-member: agent:pi not in c1")), false);
+  assert.equal(isTransient(new Error("unknown-request: r")), false);
+  const store = new Store(":memory:");
+  const inner = new LocalCore(store);
+  let failures = 2;
+  const core = { call: async (a: string, op: string, x: Record<string, unknown> = {}) => { if (a === "agent:pi" && op === "post" && failures-- > 0) throw new Error("core-unreachable: http://core (fetch failed)"); return inner.call(a, op, x); } } as never;
+  const alice = (op: string, a: Record<string, unknown> = {}) => inner.call("human:alice", op, a) as Promise<any>;
+  await alice("create", { id: "c1", title: "t" });
+  await alice("join", { context: "c1", actor: "agent:pi", caps: "read,write" });
+  const model = await fakeModel((_m, n) => `POST: answer number ${n}`);
+  const errors: string[] = [];
+  const host = new Host(core);
+  host.onError = (e) => errors.push(String((e.error as Error).message));
+  try {
+    await host.add({ actor: "agent:pi", harness: await PiHarness.open({ ...piOpts(model.baseUrl), maxRounds: 1 }) });
+    await alice("post", { context: "c1", text: "please answer" });
+    for (let i = 0; i < 6; i++) await host.tick();
+    assert.equal(errors.length, 2, `the two outages were reported to the host, not to the model: ${JSON.stringify(errors)}`);
+    assert.deepEqual(posts(store), ["answer number 1"], "the reply of the first model call arrived, once");
+    assert.equal(model.requests.length, 1, "and the model was asked once: the retries reused its remembered reply");
+  } finally {
+    await host.close();
+    await model.close();
+    store.close();
+  }
+});
