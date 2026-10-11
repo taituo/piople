@@ -36,7 +36,7 @@ const PINNED = ["decision.requested", "decision.resolved"];
 export function eventLine(e: MemEvent): string {
   const d = e.data;
   const id = typeof d.decisionId === "string" ? ` [${d.decisionId}]` : "";
-  const body = typeof d.text === "string" ? d.text : typeof d.question === "string" ? d.question : typeof d.answer === "string" ? d.answer : JSON.stringify(d);
+  const body = typeof d.text === "string" ? d.text : typeof d.question === "string" ? d.question : typeof d.answer === "string" ? d.answer : (() => { try { return JSON.stringify(d); } catch { return "[unreadable]"; } })();
   return `${e.seq} ${e.actorId} ${e.type}${id}: ${body}`;
 }
 

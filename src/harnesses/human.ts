@@ -19,8 +19,9 @@ const clip = (t: string) => (t.length > MAX_LINE ? `${t.slice(0, MAX_LINE)} … 
 
 const describe = (e: { seq: number; actorId: string; type: string; data: Record<string, unknown> }) => {
   const d = e.data;
-  const body = d.text ?? d.question ?? d.answer ?? (Object.keys(d).length ? JSON.stringify(d) : "");
-  return clip(`${e.seq} ${e.actorId} ${e.type}${body !== "" ? `: ${String(body)}` : ""}`);
+  const body = d.text ?? d.question ?? d.answer ?? (Object.keys(d).length ? d : "");
+  const shown = typeof body === "string" ? body : body === "" ? "" : (() => { try { return JSON.stringify(body) ?? String(body); } catch { return "[unreadable]"; } })();
+  return clip(`${e.seq} ${e.actorId} ${e.type}${shown !== "" ? `: ${shown}` : ""}`);
 };
 
 /**

@@ -121,7 +121,13 @@ export function parseCommands(reply: string): Command[] {
   return out;
 }
 
-const brief = (d: Record<string, unknown>) => `${typeof d.decisionId === "string" ? `[${d.decisionId}] ` : ""}${String(d.text ?? d.question ?? d.answer ?? JSON.stringify(d))}`.slice(0, 400);
+/** Text of a value that is not known to be a string, without ever throwing (an object whose toString is not a function makes String() throw, and a step that throws on an event never lets the cursor move past it). */
+export function asText(v: unknown): string {
+  if (typeof v === "string") return v;
+  try { return JSON.stringify(v) ?? String(v); } catch { return "[unreadable]"; }
+}
+
+const brief = (d: Record<string, unknown>) => `${typeof d.decisionId === "string" ? `[${d.decisionId}] ` : ""}${asText(d.text ?? d.question ?? d.answer ?? d)}`.slice(0, 400);
 
 /** The longest tool-call arguments a person is asked to approve (characters of the canonical JSON). */
 const MAX_APPROVAL_ARGS = 2000;
