@@ -1016,7 +1016,8 @@ export class Store {
           if (deliver) {
             const via = { via: "route", hops: sub.data.hops, submitted: { ingress, key: submittedKey } };
             if (as === "work") {
-              deliveredSeq = this.requestWork(target, sender, { id: `route-${createHash("sha256").update(`${ingress}\0${submittedKey}`).digest("hex").slice(0, 32)}`, to: choice.to ?? null, skill: choice.skill ?? null, input: { text: sub.data.text, ...via } }).seq;
+              deliveredSeq = this.requestWork(target, sender, { id: `${sender}@route-${createHash("sha256").update(`${ingress}\0${submittedKey}`).digest("hex").slice(0, 32)}`, // from public values, so it starts with the sender: Core keeps ids of that form for that actor
+                to: choice.to ?? null, skill: choice.skill ?? null, input: { text: sub.data.text, ...via } }).seq;
             } else {
               deliveredSeq = this.mutate({ type: "message.posted", contextId: target, actorId: sender, key: `route:${ingress}:${submittedKey}`, write: () => ({ text: sub.data.text, ...via }) }).seq;
             }

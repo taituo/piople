@@ -206,3 +206,26 @@ test("the queue holds exactly what still waits: terminal events remove it, repla
   assert.equal(s.eventsSince("ch-incidents", 0).filter((e) => e.type === "message.posted").length, 1, "only k1 was delivered");
   s.close();
 });
+
+test("work made by a route cannot be blocked by someone who takes its id first", async () => {
+  const { createHash } = await import("node:crypto");
+  const s = world();
+  s.join({ contextId: "realm-infra", actorId: "agent:k8s", capabilities: ["read", "write"], joinedAt: 3 }, "jk1", "human:alice");
+  s.join({ contextId: "ch-incidents", actorId: "agent:k8s", capabilities: ["read", "write"], joinedAt: 3 }, "jk2", "human:alice");
+  s.join({ contextId: "realm-infra", actorId: "human:eve", capabilities: ["read", "write"], joinedAt: 3 }, "je0", "human:alice");
+  s.join({ contextId: "ch-incidents", actorId: "human:eve", capabilities: ["read", "write"], joinedAt: 3 }, "je1", "human:alice");
+  s.setSkills("agent:k8s", ["k8s.inspect"]);
+  s.submitMessage("human:bob", "k1", "inspect the checkout pods");
+  // The id the route used to give its work: from the ingress and the submitted key, which the members of the ingress can see.
+  const old = `route-${createHash("sha256").update(`ingress:human:bob\0k1`).digest("hex").slice(0, 32)}`;
+  s.requestWork("ch-incidents", "human:eve", { id: old, to: null, skill: "k8s.inspect", input: "blocked" }); // the old id could be taken by anyone who writes there
+  // Whatever Eve managed, the route goes through and the work is the sender's
+  s.routeResolve(R, "ingress:human:bob", "k1", { context: "ch-incidents", as: "work", skill: "k8s.inspect" });
+  const routed = `human:bob@route-${old.slice("route-".length)}`;
+  const w = s.getWork("ch-incidents", routed)!;
+  assert.ok(w, "the routed work exists under the sender's id");
+  assert.equal(w.requestedBy, "human:bob");
+  assert.equal((w.input as { text: string }).text, "inspect the checkout pods", "the routed message, not what was put under the old id");
+  assert.equal((s.getWork("ch-incidents", old)!.input as string), "blocked", "and Eve's work under the old id is just her own work");
+  s.close();
+});
