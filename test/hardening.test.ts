@@ -414,3 +414,10 @@ test("a number that is not a number is named with the person's own value, never 
   assert.equal((await alice("events", { context: "c1", after: "0", limit: "10" })).length >= 1, true, "numbers given as text still work");
   store.close();
 });
+
+test("the descriptions agents read say what the bounded reads do", async () => {
+  const { OPS } = await import("../src/ops.ts");
+  for (const [op, words] of [["inbox", ["moreOpen", "4 MB", "50 items"]], ["events", ["4 MB", "short page"]], ["work-list", ["--skill"]]] as const) {
+    for (const w of words) assert.ok(OPS[op]!.description.includes(w), `${op} does not mention ${w}`);
+  }
+});

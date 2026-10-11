@@ -128,7 +128,7 @@ export const OPS: Record<string, Op> = {
     },
   },
   inbox: {
-    description: "What I owe attention: without --context a summary of all my cases; with it the events after my cursor plus pending asks and decisions",
+    description: "What I owe attention: without --context a summary of all my cases (pending counts everything owed); with it the events after my cursor (a page ends at --limit events or about 4 MB: ack the last seq you got and read again) plus pending asks, decisions and work. Each pending list shows at most 50 items or 200,000 characters; moreAssistance, moreDecisions and work.moreOpen say how many were left out, and they come as these are dealt with",
     required: [], optional: ["context", "limit", "holder"],
     run: (s, as, a) => {
       s.requireHolder(as, a.holder == null ? undefined : String(a.holder));
