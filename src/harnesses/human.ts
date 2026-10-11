@@ -13,10 +13,14 @@ export interface Console {
 
 const HELP = `say <text> | answer <request key> | <text> | decide <decision id> <option> | claim <work id> | done <work id> <attempt> <json> | fail <work id> <attempt> <reason> | skip (or an empty line)`;
 
+/** A line printed to a person is at most this long: a message may be a megabyte, and a terminal (on a phone, over mosh) cannot take that. */
+const MAX_LINE = 4000;
+const clip = (t: string) => (t.length > MAX_LINE ? `${t.slice(0, MAX_LINE)} … [${t.length - MAX_LINE} more characters; read them whole with: piople events --context <case>]` : t);
+
 const describe = (e: { seq: number; actorId: string; type: string; data: Record<string, unknown> }) => {
   const d = e.data;
   const body = d.text ?? d.question ?? d.answer ?? (Object.keys(d).length ? JSON.stringify(d) : "");
-  return `${e.seq} ${e.actorId} ${e.type}${body !== "" ? `: ${String(body)}` : ""}`;
+  return clip(`${e.seq} ${e.actorId} ${e.type}${body !== "" ? `: ${String(body)}` : ""}`);
 };
 
 /**
@@ -43,10 +47,10 @@ export class HumanHarness implements Harness {
     const events = s.events.filter((e) => e.actorId !== s.actor);
     const p = s.pending;
     const owed: string[] = [];
-    for (const a of p.assistance) owed.push(`  ask ${a.key} from ${a.from}: ${a.question}   -> answer ${a.key} | <text>`);
-    for (const d of p.decisions) owed.push(`  decision ${d.id} [${d.options.join("/")}] (${d.requestedBy}): ${d.question}   -> decide ${d.id} <option>`);
-    for (const w of p.work.mine) owed.push(`  work you hold ${w.id} attempt ${w.attempt}: ${JSON.stringify(w.input)}   -> done ${w.id} ${w.attempt} <json>`);
-    for (const w of p.work.open) owed.push(`  work you may take ${w.id}${w.skill ? ` (skill ${w.skill})` : ""}: ${JSON.stringify(w.input)}   -> claim ${w.id}`);
+    for (const a of p.assistance) owed.push(clip(`  ask ${a.key} from ${a.from}: ${a.question}`) + `   -> answer ${a.key} | <text>`);
+    for (const d of p.decisions) owed.push(clip(`  decision ${d.id} [${d.options.join("/")}] (${d.requestedBy}): ${d.question}`) + `   -> decide ${d.id} <option>`);
+    for (const w of p.work.mine) owed.push(clip(`  work you hold ${w.id} attempt ${w.attempt}: ${JSON.stringify(w.input)}`) + `   -> done ${w.id} ${w.attempt} <json>`);
+    for (const w of p.work.open) owed.push(clip(`  work you may take ${w.id}${w.skill ? ` (skill ${w.skill})` : ""}: ${JSON.stringify(w.input)}`) + `   -> claim ${w.id}`);
     if (!events.length && !owed.length) return;
     this.io.print(`== ${s.context} ==`);
     for (const e of events) this.io.print(describe(e));
