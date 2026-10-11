@@ -250,3 +250,30 @@ test("after stop() gave up on a stuck step, start() does not run a second loop f
     store.close();
   }
 });
+
+test("a host can mint ids for an agent and a case with long names: the id stays within the limit, the same for the same step, and the agent's own", async () => {
+  const { mintedId } = await import("../src/hosts/host.ts");
+  assert.equal(mintedId("agent:x", "c1#0.1"), "agent:x@c1#0.1", "a short id is as it was");
+  const actor = "agent:" + "a".repeat(60), ctx = "case-" + "c".repeat(140);
+  const long = mintedId(actor, `${ctx}#12.3`);
+  assert.ok(long.length <= 200, `${long.length} characters`);
+  assert.ok(long.startsWith(`${actor}@`), "still starts with the actor, which Core keeps for it");
+  assert.equal(long, mintedId(actor, `${ctx}#12.3`), "the same for the same step");
+  assert.notEqual(long, mintedId(actor, `${ctx}#12.4`), "and another for another call");
+  const store = new Store(":memory:");
+  const core = new LocalCore(store);
+  const call = (a: string, op: string, x: Record<string, unknown> = {}) => core.call(a, op, x) as Promise<any>;
+  await call("human:alice", "create", { id: ctx, title: "t" });
+  await call("human:alice", "join", { context: ctx, actor, caps: "read,write,decide" });
+  const errors: string[] = [];
+  const host = new Host(core, { pollMs: 5 });
+  host.onError = (e) => errors.push(String((e.error as Error).message));
+  await host.add({ actor, harness: new SyntheticHarness({ behaviors: [async (s) => { if (s.events.some((e) => /go/.test(String(e.data.text ?? "")))) await s.run("decision-request", { question: "ship?", options: "yes,no" }); }] }) });
+  await call("human:alice", "post", { context: ctx, text: "go" });
+  await host.settle();
+  assert.deepEqual(errors, []);
+  const made = store.eventsSince(ctx, 0).filter((e) => e.type === "decision.requested" && e.actorId === actor);
+  assert.equal(made.length, 1, "the agent created its decision");
+  assert.ok(String(made[0]!.data.decisionId).length <= 200);
+  store.close();
+});

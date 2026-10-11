@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { InboxDetail, InboxSummary, Store } from "../core/index.ts";
 import { OPS, opDef, runOp, type Args } from "../ops.ts";
 import type { CoreClient, Harness, Step } from "./types.ts";
@@ -14,6 +14,16 @@ export class LocalCore implements CoreClient {
 }
 
 export type HostError = { actor: string; context: string; error: unknown };
+/**
+ * The id a host gives to something its harness creates: `<actor>@<context>#<cursor>.<call>`, the same every time for the same
+ * step (a retried step replays). An id may be 200 characters but an actor and a case may be 200 each, so when the whole is
+ * longer than that the part after the "@" becomes a hash of itself (still the same every time, and still the actor's own).
+ */
+export function mintedId(actor: string, rest: string): string {
+  const whole = `${actor}@${rest}`;
+  return whole.length <= 200 ? whole : `${actor}@h${createHash("sha256").update(rest).digest("hex").slice(0, 24)}`;
+}
+
 type Entry = { actor: string; harness: Harness; recovered: boolean; failures: number; leaseUntil: number; looping?: boolean };
 
 /**
@@ -231,7 +241,7 @@ export class Host {
         const stable = `${actor}@${d.context}#${d.cursor}.${n}`;
         if (def?.required.includes("context") || def?.optional?.includes("context")) a.context ??= d.context;
         if (def?.optional?.includes("key")) { if (a.key == null) { a.key = stable; a["derived-key"] = true; } } // derived: a retried step may send other content under it
-        else if (def?.mintsId) a.id ??= stable; // starts with "<actor>@": Core reserves such ids for that actor, so nobody can take them first
+        else if (def?.mintsId) a.id ??= mintedId(actor, `${d.context}#${d.cursor}.${n}`); // starts with "<actor>@": Core reserves such ids for that actor, so nobody can take them first
         return (await this.call(actor, op, a)) as never;
       },
     };
