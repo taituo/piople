@@ -772,7 +772,18 @@ export class Store {
         if (o.status === undefined || (o.status === "claimable" ? claimable : w.status === o.status)) out.push(w);
       }
     }
-    return out.sort((a, b) => a.createdAt - b.createdAt).slice(0, limit);
+    // Also bounded in bytes, like a read of events: 200 items of 1 MB would be 200 MB in one answer. The first item always
+    // comes; ask again with `--id` (or a narrower `--status`) for the ones left out.
+    const sorted = out.sort((a, b) => a.createdAt - b.createdAt).slice(0, limit);
+    const page: WorkItem[] = [];
+    let bytes = 0;
+    for (const w of sorted) {
+      const n = JSON.stringify(w).length;
+      if (page.length && bytes + n > MAX_READ_BYTES) break;
+      page.push(w);
+      bytes += n;
+    }
+    return page;
   }
 
   /** Claim the oldest work I may take, or null. */

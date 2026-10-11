@@ -328,3 +328,17 @@ test("open asks and decisions in an inbox are bounded as well, and the rest foll
   assert.equal(answered.size, 60, "every ask was shown in the end");
   store.close();
 });
+
+test("work-list is bounded in bytes too, and the first item always comes", async () => {
+  const { alice, as, store } = world();
+  await alice("create", { id: "c1", title: "t" });
+  await alice("join", { context: "c1", actor: "agent:x", caps: "read,write" });
+  const big = JSON.stringify({ blob: "z".repeat(900_000) });
+  for (let i = 0; i < 12; i++) await alice("work-request", { context: "c1", id: `w${i}`, to: "agent:x", input: big });
+  const listed = await as("agent:x")("work-list", { context: "c1", status: "claimable" });
+  const bytes = JSON.stringify(listed).length;
+  assert.ok(listed.length >= 1 && listed.length < 12 && bytes < 5_500_000, `listed ${listed.length} items, ${bytes} bytes`);
+  assert.equal(listed[0].id, "w0", "oldest first");
+  assert.equal((await as("agent:x")("work-list", { context: "c1", id: "w11" })).length, 1, "one item by id is always reachable");
+  store.close();
+});
