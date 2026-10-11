@@ -14,7 +14,7 @@ export class LocalCore implements CoreClient {
 }
 
 export type HostError = { actor: string; context: string; error: unknown };
-type Entry = { actor: string; harness: Harness; recovered: boolean; failures: number; leaseUntil: number };
+type Entry = { actor: string; harness: Harness; recovered: boolean; failures: number; leaseUntil: number; looping?: boolean };
 
 /**
  * One process, many harnesses, each its own actor. The host only delivers: it polls each actor's
@@ -66,7 +66,7 @@ export class Host {
     const entry: Entry = { actor: o.actor, harness: o.harness, recovered: false, failures: 0, leaseUntil: 0 };
     await this.lease(entry); // refused if another host is live for this actor; nothing is registered then
     this.entries.set(o.actor, entry);
-    if (this.running) this.loops.push(this.loop(entry));
+    if (this.running && !entry.looping) this.loops.push(this.loop(entry));
   }
 
   /** Swap the harness behind an actor (reconnect / new process instance). Identity and cursor stay. */
@@ -151,7 +151,9 @@ export class Host {
   start(): void {
     if (this.running) return;
     this.running = true;
-    this.loops = [...this.entries.values()].map((e) => this.loop(e));
+    // An actor whose old loop is still inside a stuck step (stop() gave up on it) keeps that loop: a second one would run two
+    // steps of the same actor at once.
+    this.loops = [...this.entries.values()].filter((e) => !e.looping).map((e) => this.loop(e));
   }
 
   async stop(): Promise<void> {
@@ -179,6 +181,15 @@ export class Host {
   }
 
   private async loop(e: Entry): Promise<void> {
+    e.looping = true;
+    try {
+      await this.loopBody(e);
+    } finally {
+      e.looping = false;
+    }
+  }
+
+  private async loopBody(e: Entry): Promise<void> {
     const base = this.opts.pollMs ?? 200;
     while (this.running) {
       let didWork = 0;

@@ -217,3 +217,36 @@ test("stop() does not wait for ever for a harness stuck in a step; a step that i
   assert.ok(errors.some((m) => /^stop-timeout/.test(m)), "and said which problem it gave up on");
   store.close();
 });
+
+test("after stop() gave up on a stuck step, start() does not run a second loop for that actor", async () => {
+  const store = new Store(":memory:");
+  const core = new LocalCore(store);
+  const call = (a: string, op: string, x: Record<string, unknown> = {}) => core.call(a, op, x) as Promise<any>;
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  await call("human:alice", "create", { id: "c1", title: "t" });
+  await call("human:alice", "join", { context: "c1", actor: "agent:x", caps: "read,write" });
+  let release!: () => void;
+  const stuck = new Promise<void>((r) => (release = r));
+  let active = 0, maxActive = 0, calls = 0;
+  const host = new Host(core, { pollMs: 5, stopTimeoutMs: 100 });
+  host.onError = () => {};
+  await host.add({ actor: "agent:x", harness: { async step() { calls++; active++; maxActive = Math.max(maxActive, active); if (calls === 1) await stuck; else await sleep(30); active--; } } as never });
+  try {
+    host.start();
+    await call("human:alice", "post", { context: "c1", text: "one" });
+    await sleep(100);
+    await host.stop(); // gives up on the stuck step
+    host.start(); // starts again while the old loop is still inside it
+    await call("human:alice", "post", { context: "c1", text: "two" });
+    await sleep(200);
+    assert.equal(calls, 1, "nothing else runs while the stuck step is still in flight");
+    release();
+    await sleep(300);
+    assert.ok(calls >= 2, "and the actor carries on once it is released");
+    assert.equal(maxActive, 1, "never two steps of one actor at once");
+  } finally {
+    release();
+    await host.stop();
+    store.close();
+  }
+});
