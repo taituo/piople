@@ -29,7 +29,10 @@ export function statusFor(message: string): { status: number; code: string } {
 }
 
 export function createCoreServer(store: Store, o: ServerOptions = {}): http.Server {
-  const maxBody = o.maxBody ?? 1_000_000;
+  // An argument may be 1,000,000 characters (MAX_ARG_CHARS), and in JSON that is up to 4 bytes a character, or 6 for a character
+  // written as \u00XX: a limit of 1,000,000 bytes refused over HTTP what the same call does in process, from the CLI and over MCP
+  // (500,000 letters "ä", an ordinary Finnish text, got 413).
+  const maxBody = o.maxBody ?? 8_000_000;
   const server = http.createServer((req, res) => {
     const send = (status: number, body: unknown, allow?: string) => {
       const text = JSON.stringify(body);

@@ -449,3 +449,22 @@ test("a server (or a proxy) that repeats the request in an error cannot get the 
     srv.close();
   }
 });
+
+test("the body limit does not refuse what the argument limit allows: a million characters in any script go through, a body far over still gets 413", async () => {
+  const store = new Store(":memory:");
+  const token = store.issueToken("human:alice");
+  const srv = await boot(store);
+  try {
+    const post = async (text: string, key: string) => (await raw(srv.url, "/v1/ops/post", { token, body: JSON.stringify({ context: "c1", text, key }) })).status;
+    await raw(srv.url, "/v1/ops/create", { token, body: JSON.stringify({ id: "c1", title: "t" }) });
+    assert.equal(await post("a".repeat(1_000_000), "k1"), 200, "ASCII, exactly the limit");
+    assert.equal(await post("ä".repeat(500_000), "k2"), 200, "Finnish letters, 1 MB as UTF-8");
+    assert.equal(await post("😀".repeat(500_000), "k3"), 200, "emoji, 1,000,000 characters, 4 MB as UTF-8");
+    assert.equal(await post("\u0001".repeat(1_000_000), "k4"), 200, "control characters, written as 6 bytes each in JSON");
+    assert.equal(await post("a".repeat(1_000_001), "k5"), 413, "over the argument limit is refused (too-large)");
+    assert.equal((await raw(srv.url, "/v1/ops/post", { token, body: "x".repeat(9_000_000) })).status, 413, "a body over the limit is refused");
+  } finally {
+    await srv.close();
+    store.close();
+  }
+});
