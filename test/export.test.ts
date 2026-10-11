@@ -67,3 +67,29 @@ test("redactText stays fast on long inputs without an address, and still masks r
   assert.equal(redactText("mail a.b+c@example.co.uk and x@y.fi"), "mail <email> and <email>");
   assert.equal(redactText("no address here, and a lone @ sign: @"), "no address here, and a lone @ sign: @");
 });
+
+test("export-main: a mistyped database or an unwritable output is a plain error, and the reader creates nothing", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { mkdtempSync, existsSync, mkdirSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { Store } = await import("../src/core/index.ts");
+  const dir = mkdtempSync(join(tmpdir(), "piople-export-"));
+  const run = (...a: string[]) => spawnSync(process.execPath, ["--no-warnings", "src/eval/export-main.ts", ...a], { encoding: "utf8" });
+  const missing = join(dir, "typo.sqlite");
+  const a = run("--db", missing, "--out", join(dir, "o.json"));
+  assert.equal(a.status, 1);
+  assert.match(a.stderr, /^error: no database at .*typo\.sqlite \(nothing was created/);
+  assert.equal(existsSync(missing), false, "no empty database was created");
+  assert.equal(existsSync(join(dir, "o.json")), false);
+  const real = join(dir, "real.sqlite");
+  new Store(real).close();
+  const b = run("--db", real, "--out", join(dir, "no-such-dir", "o.json"));
+  assert.equal(b.status, 1);
+  assert.match(b.stderr, /^error: cannot write .*o\.json: /);
+  assert.ok(!/at .*node:internal|\.ts:\d+/.test(b.stderr), "no stack trace");
+  mkdirSync(join(dir, "ok"));
+  const c = run("--db", real, "--out", join(dir, "ok", "o.json"));
+  assert.equal(c.status, 0);
+  assert.ok(existsSync(join(dir, "ok", "o.json")));
+});
