@@ -363,18 +363,19 @@ test("the exact edges of the inbox list bounds: 50 items fit, the 51st does not;
   store.close();
 });
 
-test("every id argument must be in Unicode normal form, not just context ids and actors (decision, work, request, artifact ids)", async () => {
+test("a name that is new must be in Unicode normal form (id and key arguments), while what refers to something that exists is not held to it", async () => {
   const { alice, store } = world();
   await alice("create", { id: "c1", title: "t" });
-  const nfc = "päätös", nfd = "päätös";
+  const nfc = "p\u00e4\u00e4t\u00f6s", nfd = "pa\u0308a\u0308to\u0308s";
   assert.notEqual(nfc, nfd);
   await assert.rejects(alice("decision-request", { context: "c1", id: nfd, question: "q", options: "a,b" }), /bad-arg: id is not in Unicode normal form/);
   await assert.rejects(alice("work-request", { context: "c1", id: nfd, to: "human:alice", input: "{}" }), /bad-arg: id is not in Unicode normal form/);
   await assert.rejects(alice("observe", { context: "c1", id: nfd, text: "x" }), /bad-arg: id is not in Unicode normal form/);
-  await assert.rejects(alice("decide", { context: "c1", decision: nfd, answer: "a" }), /bad-arg: decision is not in Unicode normal form/);
-  await assert.rejects(alice("answer", { context: "c1", request: nfd, answer: "a" }), /bad-arg: request is not in Unicode normal form/);
   await assert.rejects(alice("post", { context: "c1", text: "x", key: nfd }), /bad-arg: key is not in Unicode normal form/);
   await alice("decision-request", { context: "c1", id: nfc, question: "q", options: "a,b" }); // the normal form works
   await alice("work-request", { context: "c1", id: nfc, to: "human:alice", input: "{}" });
+  // a reference is looked up, not created: it is not refused for its form (it simply does not exist)
+  await assert.rejects(alice("decide", { context: "c1", decision: nfd, answer: "a" }), (e: Error) => !/normal form/.test(e.message));
+  await assert.rejects(alice("answer", { context: "c1", request: nfd, answer: "a" }), (e: Error) => !/normal form/.test(e.message));
   store.close();
 });

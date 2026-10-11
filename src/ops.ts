@@ -286,6 +286,9 @@ export function opDef(name: string): Op | undefined {
 /** Ids are compared as strings: "ä" typed as one character and as a + combining dots look identical on screen but are two ids. */
 export const isNfc = (v: string) => v === v.normalize("NFC");
 const ACTOR_ID = /^(human|agent):[^\s\p{Cc}\p{Cf}\p{Z}]{1,200}$/u;
+const BASIC_ACTOR = /^(human|agent):[^\s\p{Cc}]{1,200}$/u; // what an existing actor id may look like
+/** The arguments that name something new; the others refer to something that may have been made before the look-alike rules. */
+const NEW_NAME_ARGS = ["id", "key"];
 const RESERVED_KEY = /^(?:artifact|claim|classified|complete|create|decision|fail|presence|promote|proposal|resolved|route|shadowed|unresolved|work):/;
 const ID_ARGS = ["context", "id", "decision", "artifact", "request", "key", "ingress", "submitted", "holder", "after-context", "parent", "realm"];
 const ACTOR_ARGS = ["actor", "to", "sender"];
@@ -301,8 +304,10 @@ export const ARG_LIMITS: Record<string, number> = { id: 200, title: 2_000, name:
 export function runOp(s: Store, as: string, name: string, a: Args): unknown {
   const op = opDef(name);
   if (!op) throw new Error(`unknown-op: ${name}`);
-  if (!ACTOR_ID.test(as) || !isNfc(as)) throw new Error(`bad-actor: ${JSON.stringify(as)} is not human:<id> or agent:<id>`);
-  for (const k of ACTOR_ARGS) if (a[k] != null && a[k] !== "" && (!ACTOR_ID.test(String(a[k])) || !isNfc(String(a[k])))) throw new Error(`bad-actor: ${k} ${JSON.stringify(String(a[k]).slice(0, 80))} is not human:<id> or agent:<id>`);
+  // A new actor id must be NFC and have no invisible characters; one that already exists keeps working under its old id.
+  const actorOk = (v: string) => BASIC_ACTOR.test(v) && ((ACTOR_ID.test(v) && isNfc(v)) || s.knowsActor(v));
+  if (!actorOk(as)) throw new Error(`bad-actor: ${JSON.stringify(as)} is not human:<id> or agent:<id>`);
+  for (const k of ACTOR_ARGS) if (a[k] != null && a[k] !== "" && !actorOk(String(a[k]))) throw new Error(`bad-actor: ${k} ${JSON.stringify(String(a[k]).slice(0, 80))} is not human:<id> or agent:<id>`);
   for (const k of Object.keys(a)) if (tooDeep(a[k])) throw new Error(`bad-arg: ${k} is nested deeper than ${MAX_DEPTH} levels`);
   for (const k of [...op.required, ...(op.optional ?? [])]) {
     const v = a[k];
@@ -311,8 +316,9 @@ export function runOp(s: Store, as: string, name: string, a: Args): unknown {
     const limit = ARG_LIMITS[k] ?? MAX_ARG_CHARS;
     if (size > limit) throw new Error(`too-large: ${k} is ${size} characters, the limit is ${limit}`);
   }
-  for (const k of ID_ARGS) if (typeof a[k] === "string" && /[\p{Cc}\p{Cf}]|(?! )\p{Z}/u.test(a[k] as string)) throw new Error(`bad-arg: ${k} contains a control character (or an invisible or unusual space one)`);
-  for (const k of ID_ARGS) if (typeof a[k] === "string" && !isNfc(a[k] as string)) throw new Error(`bad-arg: ${k} is not in Unicode normal form NFC (it would look the same as another id)`);
+  for (const k of ID_ARGS) if (typeof a[k] === "string" && /\p{Cc}/u.test(a[k] as string)) throw new Error(`bad-arg: ${k} contains a control character`);
+  for (const k of NEW_NAME_ARGS) if (typeof a[k] === "string" && /[\p{Cf}]|(?! )\p{Z}/u.test(a[k] as string)) throw new Error(`bad-arg: ${k} contains an invisible or unusual space character`);
+  for (const k of NEW_NAME_ARGS) if (typeof a[k] === "string" && !isNfc(a[k] as string)) throw new Error(`bad-arg: ${k} is not in Unicode normal form NFC (it would look the same as another id)`);
   // Core's own keys (`claim:<work>:<attempt>`, `complete:…`, `decision:<id>` …) are predictable from ids every member can see.
   // A key a caller names itself must not be one of them, or a writer could take `claim:w1:1` first and nobody could ever claim w1.
   if (typeof a.key === "string" && RESERVED_KEY.test(a.key)) throw new Error(`bad-arg: key ${JSON.stringify(a.key.slice(0, 60))} starts with a prefix Core uses for its own keys`);
