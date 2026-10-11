@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { parseArgs } from "node:util";
+import { parseOrExit } from "../cli/args.ts";
 import { jevClassifier } from "../harnesses/jev.ts";
 import { keywordClassifier } from "../harnesses/router.ts";
 import { consensusClassifier } from "../harnesses/consensus.ts";
@@ -15,11 +15,17 @@ import type { EvalDataset } from "./routing.ts";
  * jev needs OPENROUTER_API_KEY (or JEV_API_KEY), JEV_MODEL (exact id), optionally JEV_ENDPOINT, and
  * --send-to-external: evaluating shows the dataset's message texts and destination names to an outside service.
  */
-const { values } = parseArgs({
+const { values } = parseOrExit({
   options: { dataset: { type: "string" }, classifier: { type: "string" }, "target-precision": { type: "string" }, json: { type: "boolean" }, "send-to-external": { type: "boolean" }, consensus: { type: "boolean" }, context: { type: "string" }, "needs-human-above": { type: "string" } },
   strict: true,
 });
-const dataset = JSON.parse(readFileSync(values.dataset ?? "eval/routing-synthetic.json", "utf8")) as EvalDataset;
+const datasetPath = values.dataset ?? "eval/routing-synthetic.json";
+const dataset = loadDataset(datasetPath);
+for (const [flag, v, ok, want] of [
+  ["target-precision", values["target-precision"], (n: number) => n > 0 && n <= 1, "a number above 0 and at most 1"],
+  ["needs-human-above", values["needs-human-above"], (n: number) => n >= 0 && n <= 1, "a number from 0 to 1"],
+  ["context", values.context, (n: number) => Number.isInteger(n) && n >= 0, "a whole number, 0 or more"],
+] as const) if (v !== undefined && !(v.trim() !== "" && ok(Number(v)))) die(`--${flag} must be ${want} (got ${JSON.stringify(v)})`);
 const which = values.classifier ?? "keyword";
 let classifier;
 if (which === "keyword") classifier = keywordClassifier();
@@ -35,6 +41,22 @@ const run = await runRoutingEval(dataset, classifier!, { context: values.context
 const analysis = analyze(run.rows, { targetPrecision: values["target-precision"] === undefined ? undefined : Number(values["target-precision"]) });
 if (values.json) process.stdout.write(JSON.stringify({ run, analysis }, null, 2) + "\n");
 else process.stdout.write(formatReport(run, analysis, dataset.note) + "\n");
+
+/** Read and check a dataset file; a person who points at the wrong file gets a sentence, not a stack trace. */
+function loadDataset(path: string): EvalDataset {
+  let raw: string;
+  try { raw = readFileSync(path, "utf8"); } catch (e) { return die(`cannot read the dataset ${path}: ${e instanceof Error ? e.message.replace(/^[A-Z]+: /, "") : String(e)}`); }
+  let d: unknown;
+  try { d = JSON.parse(raw); } catch (e) { return die(`${path} is not valid JSON (${e instanceof Error ? e.message : String(e)})`); }
+  const o = d as Partial<EvalDataset> | null;
+  if (!o || typeof o !== "object" || Array.isArray(o) || !Array.isArray(o.contexts) || !Array.isArray(o.members) || !Array.isArray(o.cases)) {
+    return die(`${path} is not a routing dataset: it needs "contexts", "members" and "cases" lists (see eval/routing-synthetic.json)`);
+  }
+  if (!o.cases.length) return die(`${path} has no cases to evaluate`);
+  const bad = o.cases.findIndex((c) => !c || typeof c.id !== "string" || typeof c.sender !== "string" || typeof c.text !== "string");
+  if (bad >= 0) return die(`${path}: case number ${bad + 1} needs a string "id", "sender" and "text"`);
+  return o as EvalDataset;
+}
 
 function die(message: string): never {
   process.stderr.write(`error: ${message}\n`);

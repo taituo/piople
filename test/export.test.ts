@@ -114,3 +114,57 @@ test("admin: revoking or listing on a mistyped database is an error that creates
   assert.equal(admin(real, "revoke-tokens", "--actor", "agent:fetch").status, 0, "and then revoking works on it");
   assert.equal(admin(join(dir, "r2.sqlite"), "add-router", "--actor", "agent:router").status, 0, "designating a router may start one too");
 });
+
+test("eval: a wrong dataset or a meaningless number is a sentence and exit 2, never a stack trace or NaN in a report", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "piople-evalcli-"));
+  writeFileSync(join(dir, "bad.json"), "{ not json");
+  writeFileSync(join(dir, "shape.json"), '{"cases": "nope"}');
+  writeFileSync(join(dir, "empty.json"), '{"contexts":[],"members":[],"cases":[]}');
+  writeFileSync(join(dir, "case.json"), '{"contexts":[],"members":[],"cases":[{"id":"x"}]}');
+  const run = (...a: string[]) => spawnSync(process.execPath, ["--no-warnings", "src/eval/main.ts", ...a], { encoding: "utf8" });
+  const cases: Array<[string[], RegExp]> = [
+    [["--dataset", join(dir, "missing.json")], /^error: cannot read the dataset .*missing\.json: /],
+    [["--dataset", join(dir, "bad.json")], /^error: .*bad\.json is not valid JSON/],
+    [["--dataset", join(dir, "shape.json")], /^error: .*shape\.json is not a routing dataset/],
+    [["--dataset", join(dir, "empty.json")], /^error: .*empty\.json has no cases/],
+    [["--dataset", join(dir, "case.json")], /^error: .*case\.json: case number 1 needs a string "id", "sender" and "text"/],
+    [["--target-precision", "abc"], /^error: --target-precision must be a number above 0 and at most 1/],
+    [["--target-precision", "2"], /^error: --target-precision must be/],
+    [["--target-precision", ""], /^error: --target-precision must be/],
+    [["--context", "x"], /^error: --context must be a whole number/],
+    [["--context", "-1"], /^error: Option '--context' argument is ambiguous/], // the parser: a value that starts with "-" looks like an option
+    [["--context=-1"], /^error: --context must be a whole number/],
+    [["--needs-human-above", "7"], /^error: --needs-human-above must be a number from 0 to 1/],
+  ];
+  for (const [args, want] of cases) {
+    const r = run(...args);
+    assert.equal(r.status, 2, args.join(" "));
+    assert.match(r.stderr, want, args.join(" "));
+    assert.ok(!/node:internal|\.ts:\d+/.test(r.stderr), `${args.join(" ")}: no stack trace`);
+    assert.equal(r.stdout, "");
+  }
+  const ok = run("--target-precision", "0.9", "--context", "1");
+  assert.equal(ok.status, 0);
+  assert.ok(!/NaN|undefined/.test(ok.stdout), "a good run has no NaN or undefined in its report");
+});
+
+test("a mistyped flag, or a flag without its value, is a sentence and exit 2 in every tool, never a stack trace of Node's files", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const tools: Array<[string, string[]]> = [
+    ["src/cli/admin.ts", ["--nonsense", "x", "list-tokens"]], ["src/cli/admin.ts", ["--db"]],
+    ["src/hosts/watch.ts", ["--nonsense"]], ["src/hosts/watch.ts", ["--as"]],
+    ["src/eval/export-main.ts", ["--bogus"]], ["src/eval/export-main.ts", ["--out"]],
+    ["src/eval/main.ts", ["--bogus"]], ["src/eval/main.ts", ["--context", "-1"]],
+  ];
+  for (const [file, args] of tools) {
+    const r = spawnSync(process.execPath, ["--no-warnings", file, ...args], { encoding: "utf8", input: "", timeout: 20_000 });
+    assert.equal(r.status, 2, `${file} ${args.join(" ")}`);
+    assert.match(r.stderr, /^error: (Unknown option|Option)/, `${file} ${args.join(" ")}: ${r.stderr.slice(0, 80)}`);
+    assert.ok(!/node:internal|\.ts:\d+/.test(r.stderr), `${file} ${args.join(" ")}: no stack trace`);
+    assert.equal(r.stdout, "");
+  }
+});

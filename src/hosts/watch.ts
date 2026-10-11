@@ -1,5 +1,5 @@
 import { createInterface } from "node:readline";
-import { parseArgs } from "node:util";
+import { parseOrExit } from "../cli/args.ts";
 import { Store } from "../core/index.ts";
 import { HumanHarness, type Console } from "../harnesses/human.ts";
 import { Host, LocalCore } from "./host.ts";
@@ -11,7 +11,7 @@ import { HttpCore } from "./http-core.ts";
  *   PIO_TOKEN=pio_... node src/hosts/watch.ts --as human:alice --url http://core:8899
  * Shows what is new and what is owed, and lets the person answer. `help` lists the commands. Ctrl-D leaves.
  */
-const { values } = parseArgs({ options: { as: { type: "string" }, db: { type: "string" }, url: { type: "string" } }, strict: true });
+const { values } = parseOrExit({ options: { as: { type: "string" }, db: { type: "string" }, url: { type: "string" } }, strict: true });
 if (!values.as || !/^(human|agent):\S+$/.test(values.as)) {
   process.stderr.write("usage: watch --as <human:x> [--db path | --url http://core:8899 (token in PIO_TOKEN)]\n");
   process.exit(2);

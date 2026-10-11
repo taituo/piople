@@ -1,5 +1,5 @@
 import { existsSync, writeFileSync } from "node:fs";
-import { parseArgs } from "node:util";
+import { parseOrExit } from "../cli/args.ts";
 import { Store } from "../core/index.ts";
 import { exportLabelled } from "./export.ts";
 
@@ -9,7 +9,7 @@ import { exportLabelled } from "./export.ts";
  * Then: node src/eval/main.ts --dataset my-messages.json [--classifier jev --send-to-external --context 1]
  * The file contains real message text: keep it local, review it, and remember --send-to-external shows it to a third party.
  */
-const { values } = parseArgs({ options: { db: { type: "string" }, out: { type: "string" }, "min-length": { type: "string" }, redact: { type: "boolean" }, since: { type: "string" } }, strict: true });
+const { values } = parseOrExit({ options: { db: { type: "string" }, out: { type: "string" }, "min-length": { type: "string" }, redact: { type: "boolean" }, since: { type: "string" } }, strict: true });
 if (!values.out) { process.stderr.write("usage: export-main --db <sqlite> --out <file.json> [--min-length N] [--redact] [--since SEQ]\n"); process.exit(2); }
 const dbPath = values.db ?? process.env.PIO_DATA ?? "./data/piople.sqlite";
 // A reader must not make what it reads: opening a Store creates a missing database, so a mistyped --db would give an empty one

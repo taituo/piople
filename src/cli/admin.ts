@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { parseArgs } from "node:util";
+import { parseOrExit } from "./args.ts";
 import { Store } from "../core/index.ts";
 
 /**
@@ -12,7 +12,7 @@ import { Store } from "../core/index.ts";
  *   node src/cli/admin.ts --db ./data/p.sqlite remove-router --actor agent:router
  *   node src/cli/admin.ts --db ./data/p.sqlite list-routers
  */
-const { values, positionals } = parseArgs({
+const { values, positionals } = parseOrExit({
   args: process.argv.slice(2),
   options: { db: { type: "string" }, actor: { type: "string" }, "ttl-ms": { type: "string" } },
   allowPositionals: true,
