@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { parseArgs } from "node:util";
+import { parseOrExit } from "./args.ts";
 import { Store } from "../core/index.ts";
 import { OPS, opDef, runOp } from "../ops.ts";
 
@@ -21,15 +21,20 @@ if (helpAsked || !op || !opDef(op)) {
   process.exit(helpAsked || !op ? 0 : 2);
 }
 
-const head = parseArgs({ args: argv.slice(0, opIdx), options: { db: { type: "string" }, as: { type: "string" } }, strict: true });
+const head = parseOrExit({ args: argv.slice(0, opIdx), options: { db: { type: "string" }, as: { type: "string" } }, strict: true });
 const opArgs: Record<string, string> = {};
-for (let i = opIdx + 1; i < argv.length; i += 2) {
-  const k = argv[i]!, v = argv[i + 1];
+for (let i = opIdx + 1; i < argv.length;) {
+  const k = argv[i]!;
+  // `--name=value` as well as `--name value` (the first "=" splits: the value may contain more)
+  const eq = k.startsWith("--") ? k.indexOf("=") : -1;
+  if (eq > 2) { opArgs[k.slice(2, eq)] = k.slice(eq + 1); i += 1; continue; }
+  const v = argv[i + 1];
   if (!k.startsWith("--") || v === undefined) {
-    process.stderr.write(`error: expected --name value pairs, got ${k}\n`);
+    process.stderr.write(`error: expected --name value (or --name=value) pairs, got ${k}\n`);
     process.exit(2);
   }
   opArgs[k.slice(2)] = v;
+  i += 2;
 }
 // A misspelt option (`--lease-mz`) must not be dropped silently: the call would run without what was meant. (Over HTTP
 // and MCP extra arguments are ignored on purpose, e.g. attempts to name another actor; here a person types the flags.)

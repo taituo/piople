@@ -229,3 +229,21 @@ test("cli: an operation that only reads does not create a database on a mistyped
   assert.equal(run(real, "create", "--id", "c1", "--title", "t").status, 0, "a write starts the database");
   assert.equal(run(real, "events", "--context", "c1").status, 0, "and a read finds it");
 });
+
+test("cli: --name=value works like --name value (the first = splits), a text may start with dashes, and a bad flag before the op is a sentence", () => {
+  const dir = mkdtempSync(join(tmpdir(), "piople-eq-"));
+  const db = join(dir, "x.sqlite");
+  const run = (...args: string[]) => spawnSync(process.execPath, ["--no-warnings", "src/cli/main.ts", "--db", db, "--as", "human:alice", ...args], { encoding: "utf8" });
+  assert.equal(run("create", "--id=c1", "--title=Checkout down").status, 0);
+  const texts = ["- one thing", "-- a remark", "-5 degrees", "a=b=c"];
+  for (const [i, t] of texts.entries()) assert.equal(run("post", "--context=c1", `--text=${t}`, `--key=eq${i}`).status, 0, t);
+  assert.equal(run("post", "--context", "c1", "--text", "--force", "--key", "sp").status, 0, "a value that looks like an option, in the two-word form");
+  const stored = (JSON.parse(run("events", "--context=c1").stdout) as Array<{ type: string; data: { text?: string } }>).filter((e) => e.type === "message.posted").map((e) => e.data.text);
+  assert.deepEqual(stored, [...texts, "--force"]);
+  const bad = run("post", "--context=c1", "oops");
+  assert.equal(bad.status, 2);
+  assert.match(bad.stderr, /^error: expected --name value \(or --name=value\) pairs, got oops/);
+  const early = spawnSync(process.execPath, ["--no-warnings", "src/cli/main.ts", "--bogus=1", "--as", "human:alice", "actor"], { encoding: "utf8", env: { ...process.env, PIO_DATA: db } });
+  assert.equal(early.status, 2);
+  assert.ok(!/node:internal|\.ts:\d+/.test(early.stderr), early.stderr.slice(0, 120));
+});
