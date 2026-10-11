@@ -297,3 +297,43 @@ test("what is owed to a Pi agent is clipped in the prompt: a flood of long asks,
   assert.match(small, /ASK a1 from human:bob: what time\?/, "short ones are untouched");
   assert.doesNotMatch(small, /more characters|not shown/);
 });
+
+test("after a model round times out the agent recovers: the stuck request is given up on and the next try is sent and answered", async () => {
+  const http = await import("node:http");
+  const real = await fakeModel(() => "POST: hello back");
+  let seen = 0;
+  const held: Array<{ destroy(): void }> = [];
+  const proxy = http.createServer(async (req, res) => {
+    seen++;
+    let b = "";
+    req.on("data", (d) => (b += d));
+    await new Promise((r) => req.on("end", r));
+    if (seen === 1) { held.push(req.socket); return; } // the first request is accepted and never answered
+    const r = await fetch(real.baseUrl + req.url!.replace(/^\/v1/, ""), { method: "POST", headers: { "content-type": "application/json" }, body: b });
+    res.writeHead(r.status, { "content-type": r.headers.get("content-type") ?? "text/event-stream" });
+    res.end(Buffer.from(await r.arrayBuffer()));
+  });
+  await new Promise<void>((r) => proxy.listen(0, "127.0.0.1", r));
+  const baseUrl = `http://127.0.0.1:${(proxy.address() as { port: number }).port}/v1`;
+  const { store, alice } = world();
+  const errors: string[] = [];
+  const host = new Host(new LocalCore(store));
+  host.onError = (e) => errors.push(String((e.error as Error).message));
+  try {
+    await host.add({ actor: "agent:pi", harness: await PiHarness.open({ ...piOpts(baseUrl), runTimeoutMs: 400 }) });
+    await alice("create", { id: "c1", title: "t" });
+    await alice("join", { context: "c1", actor: "agent:pi", caps: "read,write" });
+    await alice("post", { context: "c1", text: "hello?" });
+    await host.tick(); // times out
+    assert.ok(errors.some((m) => /no answer within 400 ms/.test(m)));
+    await host.tick(); // must go out as a new request and be answered
+    assert.equal(seen, 2, "the retry was sent (before the fix it queued behind the stuck run and never left)");
+    assert.deepEqual(posts(store), ["hello back"]);
+  } finally {
+    for (const s of held) s.destroy();
+    await host.close();
+    await real.close();
+    proxy.close();
+    store.close();
+  }
+});

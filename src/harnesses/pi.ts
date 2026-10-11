@@ -476,6 +476,14 @@ export class PiHarness implements Harness {
     clearTimeout(timer);
     if (timedOut) {
       this.map.prepare(`INSERT INTO failed(request_id,n) VALUES(?,1) ON CONFLICT(request_id) DO UPDATE SET n=n+1`).run(requestId);
+      // Give up on the stuck run, or the conversation stays busy with it: every retry would queue behind it, never send a
+      // request and time out again, until the dead connection finally dies. The abort has a limit of its own.
+      let abortTimer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        conv.abort(BACKGROUND_CONTEXT, { background: true }).catch(() => {}),
+        new Promise<void>((r) => { abortTimer = setTimeout(r, 5000); }),
+      ]);
+      clearTimeout(abortTimer);
       throw new Error(`model call failed: no answer within ${limit} ms`);
     }
     let got = await this.assistantSince(conv, before);
