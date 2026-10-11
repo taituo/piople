@@ -64,6 +64,18 @@ const flag = (v: unknown): boolean => {
   if (v === true || v === "true") return true;
   throw new Error(`bad-flag: ${JSON.stringify(String(v).slice(0, 40))} is not true or false`);
 };
+/**
+ * A number argument. Over the CLI and MCP everything arrives as text; `Number("nope")` is NaN, and the message that followed
+ * (`bad-seq: NaN`, `no event w1#NaN`) did not say what was wrong. Now: the argument\'s name and the value the person gave.
+ */
+function num(a: Args, key: string, code: string, fallback?: number): number | undefined {
+  const v = a[key];
+  if (v == null) return fallback;
+  const n = typeof v === "string" && v.trim() === "" ? NaN : Number(v);
+  if (Number.isNaN(n)) throw new Error(`${code}: ${key} ${JSON.stringify(String(v).slice(0, 40))} is not a number`);
+  return n;
+}
+
 const key = (a: Args) => (a.key == null ? randomUUID() : String(a.key));
 
 export const OPS: Record<string, Op> = {
@@ -112,7 +124,7 @@ export const OPS: Record<string, Op> = {
     description: "Read context events after seq (members only). A page ends at --limit events or about 4 MB, so a short page is not the end: read on after the last seq until a page is empty",
     required: ["context"], optional: ["after", "limit"],
     run: (s, as, a) => {
-      return s.readEvents(str(a, "context"), as, Number(a.after ?? 0), Number(a.limit ?? 200));
+      return s.readEvents(str(a, "context"), as, num(a, "after", "bad-seq", 0)!, num(a, "limit", "bad-arg", 200)!);
     },
   },
   inbox: {
@@ -120,7 +132,7 @@ export const OPS: Record<string, Op> = {
     required: [], optional: ["context", "limit", "holder"],
     run: (s, as, a) => {
       s.requireHolder(as, a.holder == null ? undefined : String(a.holder));
-      return a.context == null ? s.inbox(as) : s.inboxOf(str(a, "context"), as, Number(a.limit ?? 200));
+      return a.context == null ? s.inbox(as) : s.inboxOf(str(a, "context"), as, num(a, "limit", "bad-arg", 200)!);
     },
   },
   ack: {
@@ -128,13 +140,13 @@ export const OPS: Record<string, Op> = {
     required: ["context", "seq"], optional: ["holder"],
     run: (s, as, a) => {
       s.requireHolder(as, a.holder == null ? undefined : String(a.holder));
-      return { cursor: s.ack(str(a, "context"), as, Number(a.seq)) };
+      return { cursor: s.ack(str(a, "context"), as, num(a, "seq", "bad-seq")!) };
     },
   },
   "host-lease": {
     description: "Acquire or renew the lease on my inbox for this host process. Refused (already-hosted) while another holder's lease is live; then only the holder may inbox/ack",
     required: ["holder"], optional: ["ttl-ms"],
-    run: (s, as, a) => s.hostLease(as, str(a, "holder"), a["ttl-ms"] == null ? 30_000 : Number(a["ttl-ms"])),
+    run: (s, as, a) => s.hostLease(as, str(a, "holder"), num(a, "ttl-ms", "bad-ttl", 30_000)!),
   },
   "host-release": {
     description: "Give up my inbox lease at once (the holder only)",
@@ -153,13 +165,13 @@ export const OPS: Record<string, Op> = {
   "work-list": {
     description: "Work in the contexts I may read (all, or --context; --id for one item), oldest first; --status open|claimed|done|failed|claimable, --skill for the items of one skill (a lister that looks for one kind of work is not hidden by the first 200 items of others). Reading is enough: it shows work, it does not let me take it",
     required: [], optional: ["context", "id", "status", "skill", "limit"],
-    run: (s, as, a) => s.listWork(as, { ...(a.context == null ? {} : { context: str(a, "context") }), ...(a.id == null ? {} : { id: str(a, "id") }), ...(a.status == null ? {} : { status: str(a, "status") as never }), ...(a.skill == null ? {} : { skill: str(a, "skill") }), ...(a.limit == null ? {} : { limit: Number(a.limit) }) }),
+    run: (s, as, a) => s.listWork(as, { ...(a.context == null ? {} : { context: str(a, "context") }), ...(a.id == null ? {} : { id: str(a, "id") }), ...(a.status == null ? {} : { status: str(a, "status") as never }), ...(a.skill == null ? {} : { skill: str(a, "skill") }), ...(a.limit == null ? {} : { limit: num(a, "limit", "bad-arg")! }) }),
   },
   "work-claim": {
     description: "Atomically claim work: --id <work> or --next for the oldest I may take. Returns the attempt number; pass work:<id>:<attempt> on as your idempotency key",
     required: ["context"], optional: ["id", "next", "lease-ms"],
     run: (s, as, a) => {
-      const lease = a["lease-ms"] == null ? undefined : Number(a["lease-ms"]);
+      const lease = num(a, "lease-ms", "bad-lease");
       if (a.id != null) return s.claimWork(str(a, "context"), as, str(a, "id"), lease);
       if (flag(a.next)) return s.claimNext(str(a, "context"), as, lease) ?? { work: null };
       throw new Error("missing: id or next");
@@ -168,22 +180,22 @@ export const OPS: Record<string, Op> = {
   "work-complete": {
     description: "Finish claimed work with the attempt you were given; refused if the claim moved on",
     required: ["context", "id", "attempt"], optional: ["result"],
-    run: (s, as, a) => s.completeWork(str(a, "context"), as, str(a, "id"), Number(a.attempt), json(a.result)),
+    run: (s, as, a) => s.completeWork(str(a, "context"), as, str(a, "id"), num(a, "attempt", "bad-arg")!, json(a.result)),
   },
   "work-fail": {
     description: "Give up claimed work; --retry true reopens it for anyone eligible",
     required: ["context", "id", "attempt", "reason"], optional: ["retry"],
-    run: (s, as, a) => s.failWork(str(a, "context"), as, str(a, "id"), Number(a.attempt), str(a, "reason"), flag(a.retry)),
+    run: (s, as, a) => s.failWork(str(a, "context"), as, str(a, "id"), num(a, "attempt", "bad-arg")!, str(a, "reason"), flag(a.retry)),
   },
   submit: {
     description: "Submit a message without saying where it belongs; it waits in my ingress until a router routes it. --after-context/--after-seq name the routed message this reacts to (hop limit)",
     required: ["text"], optional: ["key", "after-context", "after-seq"],
-    run: (s, as, a) => s.submitMessage(as, key(a), str(a, "text"), a["after-context"] == null ? undefined : { context: str(a, "after-context"), seq: Number(a["after-seq"]) }),
+    run: (s, as, a) => s.submitMessage(as, key(a), str(a, "text"), a["after-context"] == null ? undefined : { context: str(a, "after-context"), seq: num(a, "after-seq", "bad-after")! }),
   },
   "route-pending": {
     description: "Router only: submitted messages still waiting for a route, with any recorded classification",
     required: [], optional: ["limit"],
-    run: (s, as, a) => s.routePending(as, Number(a.limit ?? 50)),
+    run: (s, as, a) => s.routePending(as, num(a, "limit", "bad-arg", 50)!),
   },
   "route-targets": {
     description: "Router only: what the sender may address. Show a classifier nothing else",
@@ -193,7 +205,7 @@ export const OPS: Record<string, Op> = {
   "route-recent": {
     description: "Router only: the last messages before an event in contexts the sender may read (context for replies). Show a classifier only what its realm rules allow",
     required: ["sender"], optional: ["before", "limit"],
-    run: (s, as, a) => s.routeRecent(as, str(a, "sender"), Number(a.before ?? Number.MAX_SAFE_INTEGER), Number(a.limit ?? 3)),
+    run: (s, as, a) => s.routeRecent(as, str(a, "sender"), num(a, "before", "bad-arg", Number.MAX_SAFE_INTEGER)!, num(a, "limit", "bad-arg", 3)!),
   },
   "route-classified": {
     description: "Router only: record the classifier's assessment of a submitted message (JSON). Not a decision",

@@ -392,3 +392,25 @@ test("a capability that is misspelt is bad-caps with a hint, not 'forbidden' as 
   assert.deepEqual(agentTargets.find((t) => t.id === "c1")?.capabilities, ["read", "write"]);
   store.close();
 });
+
+test("a number that is not a number is named with the person's own value, never 'NaN'", async () => {
+  const { alice, store } = world();
+  await alice("create", { id: "c1", title: "t" });
+  await alice("work-request", { context: "c1", id: "w1", to: "human:alice", input: "{}" });
+  const cases: Array<[string, Record<string, unknown>, RegExp]> = [
+    ["events", { context: "c1", after: "nope" }, /^bad-seq: after "nope" is not a number$/],
+    ["events", { context: "c1", limit: "many" }, /^bad-arg: limit "many" is not a number$/],
+    ["inbox", { context: "c1", limit: "x" }, /^bad-arg: limit "x" is not a number$/],
+    ["ack", { context: "c1", seq: "last" }, /^bad-seq: seq "last" is not a number$/],
+    ["ack", { context: "c1", seq: "" }, /^missing: seq$/], // a blank is caught earlier, as missing
+    ["host-lease", { holder: "h", "ttl-ms": "soon" }, /^bad-ttl: ttl-ms "soon" is not a number$/],
+    ["work-claim", { context: "c1", id: "w1", "lease-ms": "long" }, /^bad-lease: lease-ms "long" is not a number$/],
+    ["work-complete", { context: "c1", id: "w1", attempt: "first", result: "1" }, /^bad-arg: attempt "first" is not a number$/],
+    ["work-fail", { context: "c1", id: "w1", attempt: "first", reason: "r" }, /^bad-arg: attempt "first" is not a number$/],
+    ["work-list", { limit: "abc" }, /^bad-arg: limit "abc" is not a number$/],
+    ["submit", { text: "t", "after-context": "c1", "after-seq": "two" }, /^bad-after: after-seq "two" is not a number$/],
+  ];
+  for (const [op, args, want] of cases) await assert.rejects(alice(op, args), (e: Error) => want.test(e.message) && !/NaN/.test(e.message), `${op} ${JSON.stringify(args)}`);
+  assert.equal((await alice("events", { context: "c1", after: "0", limit: "10" })).length >= 1, true, "numbers given as text still work");
+  store.close();
+});
