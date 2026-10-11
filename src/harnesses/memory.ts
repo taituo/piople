@@ -1,3 +1,4 @@
+import { preparePrivateDatabase } from "../core/private-file.ts";
 import { DatabaseSync } from "node:sqlite";
 
 /**
@@ -56,6 +57,7 @@ export class CaseMemory {
   }
 
   static open(path: string, o: MemoryOptions): CaseMemory {
+    preparePrivateDatabase(path);
     const db = new DatabaseSync(path);
     db.exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;
       CREATE TABLE IF NOT EXISTS nodes (

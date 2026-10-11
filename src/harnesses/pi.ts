@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { preparePrivateDatabase } from "../core/private-file.ts";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Type, createModels, createProvider, type Models } from "@earendil-works/pi-ai";
@@ -203,9 +203,10 @@ export class PiHarness implements Harness {
     const safe = o.actor.replace(/[^\w.-]/g, "_");
     let piPath = ":memory:", mapPath = ":memory:";
     if (o.dir !== ":memory:") {
-      mkdirSync(o.dir, { recursive: true });
       piPath = join(o.dir, `${safe}.pi.sqlite`);
       mapPath = join(o.dir, `${safe}.map.sqlite`);
+      preparePrivateDatabase(piPath);
+      preparePrivateDatabase(mapPath);
     }
     const map = new DatabaseSync(mapPath);
     map.exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;

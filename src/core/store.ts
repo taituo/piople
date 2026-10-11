@@ -1,7 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
+import { preparePrivateDatabase } from "./private-file.ts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { dirname } from "node:path";
 import type { Actor, Artifact, Context, ContextKind, Decision, EventType, Id, Membership, PiopleEvent, WorkItem, WorkStatus } from "./types.ts";
 import { CONTEXT_KINDS, EVENT_TYPES } from "./types.ts";
 
@@ -203,7 +202,7 @@ export class Store {
     if (typeof path !== "string" || path.trim() === "") throw new Error(`bad-db-path: a database path is required (got ${JSON.stringify(path)})`);
     let db: DatabaseSync | undefined;
     try {
-      if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+      preparePrivateDatabase(path);
       db = new DatabaseSync(path);
       this.db = db;
       this.db.exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;`);
